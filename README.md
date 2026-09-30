@@ -74,6 +74,81 @@ dsh web --patch ./dev.patch.yml
 | 新增/修改 `*.toml` 定义 | 不需要重启（下次调用即生效；watcher 会刷新工具 schema） | 同左 |
 | 升级本插件自身版本 | 已加载的模块实例不会热替换，建议重启 | 需要重启 |
 
+## 开启项目级子代理（装完必看）
+
+**项目级定义默认是关闭的。** `<projectRoot>/.dsh/agents/*.toml` 会随 `git clone` 一起到来，所以插件默认只加载用户级 `$DSH_HOME/agents/*.toml`，必须显式信任才读取项目目录（忽略时会打印一行 info 日志说明）。
+
+> 插件页目前**没有**本插件的配置表单 —— 第三方插件的配置页需要各插件自带客户端半边（官方那几个配置页都是这么做的），通用配置页尚未提供（依据见 [docs/FEATURES.md](docs/FEATURES.md) 第 11 节）。所以现在用下面的一键脚本，或让 Creator 模式下的 agent 代改。
+
+### 一键开启（PowerShell，幂等）
+
+```powershell
+$profileName = 'web'                                                    # 你的 profile 名
+$dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+$patch    = Join-Path $dshHome "profiles\$profileName\cordis.patch.yml"
+$manifest = Join-Path $dshHome "profiles\$profileName\package.json"
+$block = @(
+  ''
+  '# 允许 <projectRoot>/.dsh/agents/*.toml 的定义（dsh-agents-toml）'
+  '- id: dsh-agents-toml'
+  '  config:'
+  '    trustProjectAgents: true'
+)
+
+if (-not (Test-Path $manifest)) {
+  "profile 不存在：$manifest —— 先用 dsh --profile $profileName ... 初始化它"
+} elseif (-not ((Get-Content $manifest -Raw | ConvertFrom-Json).dsh.profile.bundles -contains 'dsh-agents-toml')) {
+  "该 profile 还没安装本插件，先运行：dsh plugin --profile $profileName add github:Heluojiang/dsh-agents-toml"
+} elseif ((Get-Content $patch -Raw) -match 'trustProjectAgents') {
+  "已存在 trustProjectAgents 配置，未修改：$patch"
+} else {
+  $lines = @(Get-Content $patch)
+  $code = @($lines | Where-Object { $_.Trim() -ne '' -and -not $_.TrimStart().StartsWith('#') })
+  if ($code.Count -eq 1 -and $code[0].Trim() -eq '[]') {
+    # 默认补丁就是一个流式空序列 []，必须替换它：在它后面追加块序列会让 YAML 解析失败
+    Set-Content -Path $patch -Encoding utf8 -Value (@($lines | Where-Object { $_.Trim() -ne '[]' }) + $block)
+  } else {
+    Add-Content -Path $patch -Encoding utf8 -Value $block
+  }
+  "已写入 $patch"
+}
+```
+
+脚本做三件事：确认该 profile 真的装了本插件（否则 `- id: dsh-agents-toml` 会指向不存在的行，`--dump-config` 打印 `patch: entry "dsh-agents-toml" not found`）；已在则跳过（幂等）；**空补丁 `[]` 用替换而不是追加**，避免 YAML 解析失败。
+
+写入后对**新任务/新会话**立即生效；开启 HMR 的 profile（`web` 默认开启）无需重启，因为补丁文件被监听。已经存在的会话/Agent 不会自动重装工具，**新建一个任务**即可。
+
+### 验证
+
+```powershell
+dsh --profile web --dump-config > $env:TEMP\dump.txt
+Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,6
+```
+
+应看到（补丁层里的这一行）：
+
+```yaml
+# == ...\profiles\web\cordis.patch.yml
+- id: dsh-agents-toml
+  name: dsh-agents-toml
+  config:
+    trustProjectAgents: true
+```
+
+### 另外两种方式
+
+- **临时试用**：`dsh web --patch .\trust-project.patch.yml`（文件内容同上，不改 profile）。
+- **让 agent 代改**：启用 Creator 模式后说"把 dsh-agents-toml 的 trustProjectAgents 打开"，它通过 `plugin_manager` 写入当前 profile。
+
+### 开启前后对比
+
+| 目录 | 作用域 | 默认 | 开启后 |
+|---|---|---|---|
+| `$DSH_HOME/agents/*.toml` | 用户级（整机） | ✅ 始终加载 | ✅ |
+| `<projectRoot>/.dsh/agents/*.toml` | 项目级（随仓库） | ❌ 忽略并记一条 info | ✅ 同名覆盖用户级 |
+
+项目根 = 会话工作目录向上最近的含 `.git` 目录；找不到则用工作目录本身。
+
 ## 目录与优先级
 
 | 目录 | 来源 | 是否默认加载 |

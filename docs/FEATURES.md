@@ -11,7 +11,7 @@
 | 能力 | 实现状态 | 说明 |
 |---|---|---|
 | 用户级定义 | ✅ | `$DSH_HOME/agents/*.toml`，始终加载 |
-| 项目级定义 | ✅ | `<projectRoot>/.dsh/agents/*.toml`，**默认关闭**，需 `trustProjectAgents: true` |
+| 项目级定义 | ✅ | `<projectRoot>/.dsh/agents/*.toml`，**默认关闭**，需 `trustProjectAgents: true`（一键开启见 §3.1） |
 | 项目根判定 | ✅ | 会话 cwd 向上最近的含 `.git` 目录；找不到则用 cwd 本身 |
 | 同名优先级 | ✅ | 项目覆盖用户；**同一目录内重名 → 两个都判失败** |
 | 单工具 + `agent_type` | ✅ | 一个工具，`agent_type` 枚举按该 Agent 的定义集生成，省 schema token |
@@ -31,7 +31,7 @@
 
 ## 3. 插件行配置
 
-写进 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`（或插件页）：
+写进 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`（插件页目前没有本插件的配置表单，见 §3.1）：
 
 ```yaml
 - id: dsh-agents-toml
@@ -48,6 +48,52 @@
 注意：patch 是整段替换 `config`，但未写的字段由 schema 默认值补齐，所以只写要改的项即可。
 
 `$DSH_HOME` 解析：环境变量 `DSH_HOME`（去空白后非空）优先，否则 `~/.dsh`。
+
+### 3.1 开启项目级子代理（一键脚本）
+
+项目级定义**默认关闭**：`<projectRoot>/.dsh/agents/*.toml` 随仓库分发，必须显式信任。**插件页没有本插件的配置表单** —— 第三方插件的配置页需要插件自带客户端半边（官方那几个配置页都是这么做的），通用配置页尚未提供（见 §11）。因此使用下面的脚本，或让 Creator 模式下的 agent 通过 `plugin_manager` 代改。
+
+```powershell
+$profileName = 'web'                                                    # 你的 profile 名
+$dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+$patch    = Join-Path $dshHome "profiles\$profileName\cordis.patch.yml"
+$manifest = Join-Path $dshHome "profiles\$profileName\package.json"
+$block = @(
+  ''
+  '# 允许 <projectRoot>/.dsh/agents/*.toml 的定义（dsh-agents-toml）'
+  '- id: dsh-agents-toml'
+  '  config:'
+  '    trustProjectAgents: true'
+)
+
+if (-not (Test-Path $manifest)) {
+  "profile 不存在：$manifest —— 先用 dsh --profile $profileName ... 初始化它"
+} elseif (-not ((Get-Content $manifest -Raw | ConvertFrom-Json).dsh.profile.bundles -contains 'dsh-agents-toml')) {
+  "该 profile 还没安装本插件，先运行：dsh plugin --profile $profileName add github:Heluojiang/dsh-agents-toml"
+} elseif ((Get-Content $patch -Raw) -match 'trustProjectAgents') {
+  "已存在 trustProjectAgents 配置，未修改：$patch"
+} else {
+  $lines = @(Get-Content $patch)
+  $code = @($lines | Where-Object { $_.Trim() -ne '' -and -not $_.TrimStart().StartsWith('#') })
+  if ($code.Count -eq 1 -and $code[0].Trim() -eq '[]') {
+    Set-Content -Path $patch -Encoding utf8 -Value (@($lines | Where-Object { $_.Trim() -ne '[]' }) + $block)
+  } else {
+    Add-Content -Path $patch -Encoding utf8 -Value $block
+  }
+  "已写入 $patch"
+}
+```
+
+脚本会先确认该 profile 确实装了本插件（否则 `- id: dsh-agents-toml` 指向不存在的行，`--dump-config` 打印 `patch: entry "dsh-agents-toml" not found`）；已配置则跳过；**默认的空补丁 `[]` 用替换而非追加** —— 在流式空序列后追加块序列会让 YAML 解析失败。
+
+生效时机：写入后对**新任务/新会话**立即生效；开启 HMR 的 profile（`web` 默认）无需重启，因为补丁文件被监听；已存在的 Agent 不会自动重装工具。验证：
+
+```powershell
+dsh --profile web --dump-config > $env:TEMP\dump.txt
+Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,6
+```
+
+临时试用可改用 `dsh web --patch .\trust-project.patch.yml`（不改 profile）。
 
 ## 4. 定义文件规范
 
@@ -204,7 +250,7 @@ deny = ["write", "edit"]              # 可选
 - **子代理工作目录不可按定义设置**：继承父会话 cwd（`acp`/`dsh-sdk` 的 provider 行可整体覆盖）。
 - **不能给子代理增加工具**：`[tools]` 只能做减法。
 - **未暴露 `run_in_background`**：后台语义由定义的 `mode` 决定。
-- **无设置页开关**：项目级信任只能通过插件行 config 显式开启。
+- **无设置页开关**：项目级信任只能通过插件行 config 显式开启（一键脚本见 §3.1）。原因：Host 的 `dsh-settings` 只把 `.volatile()` 字段做成可编辑表单，而客户端侧每个官方配置页都是一个伴生客户端包（`ctx.configForms.whileServed` + `plugins.item` 插槽），schema 驱动的通用配置页尚无客户端实现。要提供 UI 开关，需为本插件增加客户端半边。
 - **工具名写错只能在调用期发现**：DSH 未暴露可枚举的全局工具名清单，因此无法在安装期预检 `[tools]` 名字。
 - **`continuable` 不支持 `output_schema`**：该能力只适用于一次性运行。
 
