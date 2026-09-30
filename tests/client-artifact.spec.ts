@@ -212,6 +212,17 @@ test('the artifact registers one module through the loader handoff', { skip: art
   assert.doesNotMatch(artifact, /require\((["'])\.\.?\//)
 })
 
+test('the served bundle addresses exactly one slot, keyed by its bundle', { skip: artifact === undefined }, () => {
+  assert.ok(artifact !== undefined)
+  // `plugins.item` would list this plugin in the Official group beside the
+  // official settings pages; the contract sends a bundle's own configuration to
+  // `plugins.bundle.config`, keyed by the bundle's package name.
+  assert.match(artifact, /["']plugins\.bundle\.config["']/)
+  assert.doesNotMatch(artifact, /plugins\.item/)
+  assert.doesNotMatch(artifact, /plugins\.row\.config/)
+  assert.doesNotMatch(artifact, /plugins\.detail\./)
+})
+
 test('the module exports the plugin protocol the shell loads', { skip: artifact === undefined }, () => {
   const observed = loadArtifact()
   assert.equal(observed.handoffId, ENTRY_ID)
