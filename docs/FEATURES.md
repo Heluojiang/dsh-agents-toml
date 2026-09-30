@@ -56,7 +56,7 @@
 
 **首选：插件页配置。** 本插件自带客户端半边，注册到 `plugins.bundle.config`（键 = bundle 包名 `dsh-agents-toml`），因此配置显示在**它自己的插件页**里（插件 → 已安装 → dsh-agents-toml），而不是官方那一栏的独立卡片——`plugins.item` 属于官方设置页，bundle 的配置按契约就该走 `plugins.bundle.config`。可切换 `trustProjectAgents`、`toolName`、`watchDefinitions`、`reportFailuresToModel`；保存写入当前 profile 的 Cordis 补丁。这四个字段是 Host 的 volatile 引用，`src/plugin.ts` 每次读取时取当前值，因此**不需要重挂载该行**：下一次委派即按新设置执行（工具描述里的 `agent_type` 枚举在下一次安装时刷新）。
 
-**脚本化/无 GUI：** 用下面的幂等脚本改写 profile 补丁，或让 Creator 模式下的 agent 通过 `plugin_manager` 代改。
+**脚本化/无 GUI：** 用下面的幂等脚本改写 profile 补丁，或让 Creator 模式下的 agent 通过 `plugin_manager` 代改。四个开关各自的作用与场景示例见 [`examples/settings-explained.md`](../examples/settings-explained.md)。
 
 ```powershell
 $profileName = 'web'                                                    # 你的 profile 名

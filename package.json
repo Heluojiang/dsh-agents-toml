@@ -18,7 +18,8 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
-    "docs"
+    "docs",
+    "examples"
   ],
   "license": "MIT",
   "dsh": {
