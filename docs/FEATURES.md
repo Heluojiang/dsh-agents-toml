@@ -189,7 +189,7 @@ deny = ["write", "edit"]              # 可选
 | headless | 离线 Messages 协议 stub（脚本化 tool_use） | ✅ 完整委派链路，父子会话各持久化 |
 | headless | **真实模型** | ✅ 36s；项目级定义；persona 命中；工具过滤 25 → 23（`write`/`edit` 消失） |
 | **web GUI** | **真实模型 + CDP 驱动真实点击** | ✅ 模型调用 `subagent_custom`（`agent_type=gui-reviewer`）；子会话 persona 命中、`write/edit=false`；`subagent/catalog` 记录子代理；父子两会话持久化 |
-| **GitHub 安装路径** | 本地 git 克隆模拟（`dsh plugin add git+file://…`） | ✅ 干净检出无 `lib/`；pnpm 先拦截 `prepare`，按 pnpm 打印的完整 key 放行后重跑成功；安装副本由 `prepare` 构建出 `lib/`，且该构建产物能被 Harness 装载（Config schema 被采集、行进入组合） |
+| **GitHub 安装路径** | 本地 git 克隆模拟 + **真实仓库 `github:Heluojiang/dsh-agents-toml`** | ✅ 干净检出无 `lib/`；pnpm 先拦截 `prepare`，按 pnpm 打印的完整 key（codeload tarball URL + SHA）放行后重跑成功；安装副本由 `prepare` 构建出 `lib/`，且该构建产物能被 Harness 装载（Config schema 被采集、行进入组合） |
 
 验证期间发现并修复的三个缺陷（均由真机暴露）：
 

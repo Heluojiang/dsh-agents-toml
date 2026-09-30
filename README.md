@@ -33,17 +33,21 @@ dsh plugin --profile web add dsh-agents-toml
 dsh plugin --profile web add github:<you>/dsh-agents-toml
 ```
 
-git 安装拿到的是源码，所以包内自带 `prepare` 脚本（`tsc -p tsconfig.build.json`）。pnpm ≥10 默认拦截依赖的构建脚本，第一次 `add` 会失败并打印放行所需的**完整 key**（含 spec 与提交 SHA），例如：
+git 安装拿到的是源码，所以包内自带 `prepare` 脚本（`tsc -p tsconfig.build.json`）。pnpm ≥10 默认拦截依赖的构建脚本，第一次 `add` 会失败，并打印放行所需的**完整 key**（pnpm 会把它规范化成 codeload tarball URL 并带提交 SHA），例如实测输出：
 
 ```
 ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED  The git-hosted package "dsh-agents-toml@0.1.0" needs to execute build scripts but is not in the "allowBuilds" allowlist.
+Add the package to "allowBuilds" in your project's pnpm-workspace.yaml to allow it to run scripts. For example:
 allowBuilds:
-  dsh-agents-toml@github:you/dsh-agents-toml#<sha>: true
+  dsh-agents-toml@https://codeload.github.com/<you>/dsh-agents-toml/tar.gz/<sha>: true
 ```
 
-把**那一整行**追加到 `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml`（该文件已存在，内含 `packages`、`nodeLinker` 等设置 —— **追加，不要覆盖**），然后重跑 `add`。
+把 **`allowBuilds:` 下面那一整行**追加到 `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml`，然后重跑 `add`。该文件已存在（含 `packages`、`nodeLinker`、`autoInstallPeers`），**追加，不要覆盖**。
 
-注意：只写裸包名 `dsh-agents-toml: true` **不足以**放行 git 依赖（pnpm 11 按完整 spec 匹配）；必须用 pnpm 打印的那个 key。
+两个坑：
+
+- 只写裸包名 `dsh-agents-toml: true` **不足以**放行 git 依赖（pnpm 11 按完整 spec 匹配，实测被拒）。
+- key 里的 SHA 随提交变化；更新到新提交后需要把新打印的 key 也加进 `allowBuilds`。
 
 **放行构建脚本等于允许该包在你的机器上以你的权限执行代码**：只放行你自己信任的仓库，并固定提交（`github:you/dsh-agents-toml#<sha>`）以免后续推送改变实际执行的代码。
 
