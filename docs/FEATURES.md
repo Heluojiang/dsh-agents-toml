@@ -28,7 +28,7 @@
 | 子代理模型路由 | ✅ | `llm_provider` / `model` / `reasoning_effort` / `max_tokens` |
 | 只读子代理 | ⚠️ 近似 | 只能用 `[tools] deny` 限制工具；**权限预设/沙箱/审批不可按定义设置**（见第 11 节） |
 | 失败可视 | ✅ | 日志 warn + 工具描述列出不可用定义 + 调用时明确报错 |
-| 设置页开关 | ✅ | web GUI 插件页的「子代理定义（TOML）」卡片，改 4 个 volatile 字段，保存即生效（见 §3.1） |
+| 插件页配置 | ✅ | 挂在**本插件自己的插件页**上（插件 → 已安装 → dsh-agents-toml），改 4 个 volatile 字段，保存即生效（见 §3.1） |
 
 ## 3. 插件行配置
 
@@ -54,7 +54,7 @@
 
 项目级定义**默认关闭**：`<projectRoot>/.dsh/agents/*.toml` 随仓库分发，必须显式信任。
 
-**首选：插件页开关。** 本插件自带客户端半边，web GUI 的插件页会出现「子代理定义（TOML）」配置页，可切换 `trustProjectAgents`、`toolName`、`watchDefinitions`、`reportFailuresToModel`；保存写入当前 profile 的 Cordis 补丁。这四个字段是 Host 的 volatile 引用，`src/plugin.ts` 每次读取时取当前值，因此**不需要重挂载该行**：下一次委派即按新设置执行（工具描述里的 `agent_type` 枚举在下一次安装时刷新）。
+**首选：插件页配置。** 本插件自带客户端半边，注册到 `plugins.bundle.config`（键 = bundle 包名 `dsh-agents-toml`），因此配置显示在**它自己的插件页**里（插件 → 已安装 → dsh-agents-toml），而不是官方那一栏的独立卡片——`plugins.item` 属于官方设置页，bundle 的配置按契约就该走 `plugins.bundle.config`。可切换 `trustProjectAgents`、`toolName`、`watchDefinitions`、`reportFailuresToModel`；保存写入当前 profile 的 Cordis 补丁。这四个字段是 Host 的 volatile 引用，`src/plugin.ts` 每次读取时取当前值，因此**不需要重挂载该行**：下一次委派即按新设置执行（工具描述里的 `agent_type` 枚举在下一次安装时刷新）。
 
 **脚本化/无 GUI：** 用下面的幂等脚本改写 profile 补丁，或让 Creator 模式下的 agent 通过 `plugin_manager` 代改。
 
@@ -255,7 +255,7 @@ deny = ["write", "edit"]              # 可选
 - **子代理工作目录不可按定义设置**：继承父会话 cwd（`acp`/`dsh-sdk` 的 provider 行可整体覆盖）。
 - **不能给子代理增加工具**：`[tools]` 只能做减法。
 - **未暴露 `run_in_background`**：后台语义由定义的 `mode` 决定。
-- **设置页开关已提供，但不通用**：web GUI 的插件页有本插件自己的配置页（客户端半边），可切换项目级信任、工具名、目录监听与失败上报（见 §3.1）。它**不是**通用的 schema 驱动表单：Host 的 `dsh-settings` 只把 `.volatile()` 字段做成可编辑表单，而每个配置页都是插件自带的客户端包（`ctx.configForms.whileServed` + `plugins.item` 插槽）——通用页面目前没有客户端实现，所以任何插件想要 UI 都得自带半边。
+- **插件页配置已提供，但不通用**：web GUI 里本插件的配置显示在它自己的插件页上，通过 `plugins.bundle.config`（键 = bundle 包名）注册。它**不是**通用的 schema 驱动表单：Host 的 `dsh-settings` 只把 `.volatile()` 字段做成可编辑表单，而每个配置页都是插件自带的客户端包（`ctx.configForms.whileServed` + 插件页插槽）——通用页面目前没有客户端实现，所以任何插件想要 UI 都得自带半边；想放在官方栏就用 `plugins.item`，想放在自己的 bundle 页就用 `plugins.bundle.config`。
 - **`defaultProvider` / `projectAgentsDir` / `userAgentsDir` 不在设置页**：这些是部署布局，不是每用户偏好，只能在插件行 config 里改（因此它们也不是 volatile）。
 - **工具名写错只能在调用期发现**：DSH 未暴露可枚举的全局工具名清单，因此无法在安装期预检 `[tools]` 名字。
 - **`continuable` 不支持 `output_schema`**：该能力只适用于一次性运行。
@@ -271,7 +271,7 @@ deny = ["write", "edit"]              # 可选
 | `src/mapping.ts` | 能力位校验、启动请求构造、结果映射 |
 | `src/tool.ts` | 工具 schema、入参校验、委派执行 |
 | `src/host.ts` | 宿主 ctx 的结构性类型声明（**不 import 任何 `@deepseek-ai/dsh-*`**） |
-| `src/client/index.tsx` | 客户端半边：插件页配置卡片（`configForms.whileServed` + `plugins.item`），单文件以便 `tsc` 直出 |
+| `src/client/index.tsx` | 客户端半边：插件自身页面上的配置区（`configForms.whileServed` + `plugins.bundle.config`，键 = bundle 包名），单文件以便 `tsc` 直出 |
 | `src/client/shell-modules.d.ts` | 浏览器模块表的契约声明（react、jsx-runtime、ui-primitives、client/store） |
 | `scripts/build-client.mjs` | 把 CJS 产物包装成 `window.__ModuleLoader__.load({id, factory})` 并校验自洽 |
 

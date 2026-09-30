@@ -44,6 +44,7 @@
     "typecheck": "npm run typecheck:host && npm run typecheck:client",
     "typecheck:host": "tsc -p tsconfig.json",
     "typecheck:client": "tsc -p tsconfig.client.json --noEmit",
+    "pretest": "npm run build:client",
     "test": "node --test \"tests/**/*.spec.ts\"",
     "check": "npm run typecheck && npm run test",
     "prepare": "npm run build"

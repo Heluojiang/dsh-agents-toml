@@ -1,8 +1,13 @@
 /**
- * Browser half of `dsh-agents-toml`: the plugin's settings card on the Plugins
- * page. The Host serves a form only for the fields it declares volatile, and
- * the form is addressed by the profile entry id (`dsh-agents-toml`), so this
- * card edits the same profile Cordis patch a user would edit by hand.
+ * Browser half of `dsh-agents-toml`: the plugin's configuration on its own page
+ * in the Plugins list. The card registers into `plugins.bundle.config` keyed by
+ * the bundle's package name, so it renders inside the installed bundle's page
+ * (Plugins → Installed → this plugin) instead of as a standalone card in the
+ * Official group, which `plugins.item` owns for official settings pages.
+ *
+ * The Host serves a form only for the fields it declares volatile, and the form
+ * is addressed by the profile entry id (`dsh-agents-toml`), so this card edits
+ * the same profile Cordis patch a user would edit by hand.
  *
  * One file on purpose: the shell serves one artifact per package
  * (`lib/client.js`), a client factory resolves shared modules through the
@@ -21,6 +26,14 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 
 /** Profile entry id whose configuration this card edits. */
 export const ENTRY_ID = 'dsh-agents-toml'
+
+/**
+ * Package name of the bundle this client half belongs to: the key
+ * `plugins.bundle.config` dispatches on. Spelled separately from
+ * {@link ENTRY_ID} because one names a Host row's form and the other names the
+ * installed bundle whose page carries it.
+ */
+export const BUNDLE_NAME = 'dsh-agents-toml'
 
 /** Dictionary namespace owned by this plugin's client half. */
 export const NS = 'settings.dsh-agents-toml'
@@ -62,7 +75,7 @@ interface CardProps extends SettingsFormActions {
 
 /** Copy key of this plugin's dictionary. */
 type LocaleKey =
-  | 'title' | 'description'
+  | 'description'
   | 'trustLabel' | 'trustHelp'
   | 'toolNameLabel' | 'toolNameHelp'
   | 'watchLabel' | 'watchHelp'
@@ -71,7 +84,6 @@ type LocaleKey =
   | 'unavailable' | 'readOnly' | 'saveFailed' | 'save' | 'saving'
 
 const zh: Record<LocaleKey, string> = {
-  title: '子代理定义（TOML）',
   description: '在用户目录与项目目录的 TOML 文件里声明具名子代理。',
   trustLabel: '信任项目级定义',
   trustHelp: '开启后加载 <项目根>/.dsh/agents/*.toml。这些文件随仓库分发，请只对你自己信任的仓库开启。',
@@ -92,7 +104,6 @@ const zh: Record<LocaleKey, string> = {
 }
 
 const en: Record<LocaleKey, string> = {
-  title: 'Subagent definitions (TOML)',
   description: 'Declare named subagents in TOML files under the user and project directories.',
   trustLabel: 'Trust project definitions',
   trustHelp: 'Loads <projectRoot>/.dsh/agents/*.toml. Those files ship with a repository, so enable this only for repositories you trust.',
@@ -257,11 +268,13 @@ interface ClientContext {
     register(
       entry: {
         name: string
-        id: string
-        order: number
-        label: () => string
-        locale: string
-        inject: () => CardFace
+        /** Address of a keyed slot registration; list slots use `id` instead. */
+        key?: string
+        id?: string
+        order?: number
+        label?: () => string
+        locale?: string
+        inject?: () => CardFace
       },
       component: (props: CardProps) => unknown,
     ): () => void
@@ -269,24 +282,22 @@ interface ClientContext {
 }
 
 /**
- * Mount the settings card while the Host serves this plugin's form.
+ * Mount this plugin's configuration on its own bundle page while the Host
+ * serves the entry's form.
  * @param ctx - the browser plugin context.
  */
 export function apply(ctx: ClientContext): void {
-  const t = ctx.locale.bind(NS)
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-agents-toml: dictionaries')
   const controller = new AgentTomlCardController(ctx.configForms.get<AgentTomlSettings>(ENTRY_ID))
   ctx.effect(() => () => { controller.dispose() }, 'dsh-agents-toml: form subscription')
   const face = controller.inject()
   ctx.effect(
-    () => ctx.configForms.whileServed([ENTRY_ID], () => ctx.slots.inject('plugins.item', () => ctx.slots.register({
-      name: 'plugins.item',
-      id: ENTRY_ID,
-      order: 60,
-      label: () => t('title'),
+    () => ctx.configForms.whileServed([ENTRY_ID], () => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+      name: 'plugins.bundle.config',
+      key: BUNDLE_NAME,
       locale: NS,
       inject: () => face,
     }, AgentTomlCard))),
-    'dsh-agents-toml: settings page',
+    'dsh-agents-toml: bundle configuration page',
   )
 }

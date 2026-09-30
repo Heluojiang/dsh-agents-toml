@@ -4,8 +4,8 @@
  * and wire the settings card to the served form. The spec evaluates the real
  * artifact against a stub module table, so it needs no browser and no React.
  *
- * Run `npm run build:client` first; the spec self-skips while the artifact is
- * absent (a clean checkout has not built yet).
+ * Run `npm test`, whose `pretest` rebuilds `lib/client.js`; the spec self-skips
+ * while the artifact is absent (a clean checkout that has not built yet).
  */
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
@@ -15,6 +15,7 @@ const artifactUrl = new URL('../lib/client.js', import.meta.url)
 const artifact = existsSync(artifactUrl) ? readFileSync(artifactUrl, 'utf8') : undefined
 
 const ENTRY_ID = 'dsh-agents-toml'
+const BUNDLE_NAME = 'dsh-agents-toml'
 const NS = 'settings.dsh-agents-toml'
 const FIELDS = ['trustProjectAgents', 'toolName', 'watchDefinitions', 'reportFailuresToModel']
 
@@ -217,24 +218,27 @@ test('the module exports the plugin protocol the shell loads', { skip: artifact 
   assert.deepEqual(observed.module.inject, ['slots', 'locale', 'configForms'])
   assert.equal(observed.module.NS, NS)
   assert.equal(observed.module.ENTRY_ID, ENTRY_ID)
+  assert.equal(observed.module.BUNDLE_NAME, BUNDLE_NAME)
   assert.equal(typeof observed.module.apply, 'function')
 })
 
-test('apply registers dictionaries, the served form, and one Plugins-page card', { skip: artifact === undefined }, () => {
+test('apply registers dictionaries, the served form, and one bundle-page section', { skip: artifact === undefined }, () => {
   const observed = loadArtifact()
   const dictionary = observed.dictionaries[NS]
   assert.ok(dictionary !== undefined, 'the plugin registered no dictionary for its namespace')
-  for (const key of ['title', 'trustLabel', 'trustHelp', 'save']) {
+  for (const key of ['description', 'trustLabel', 'trustHelp', 'save']) {
     assert.ok(dictionary.zh[key] !== undefined && dictionary.en[key] !== undefined, `dictionary is missing ${key}`)
   }
   assert.deepEqual(observed.served, [[ENTRY_ID]])
-  assert.deepEqual(observed.slotInjections, ['plugins.item'])
+  // The Official group belongs to the official settings pages; this plugin's
+  // configuration rides its own installed bundle page instead.
+  assert.deepEqual(observed.slotInjections, ['plugins.bundle.config'])
   assert.equal(observed.registrations.length, 1)
   const entry = observed.registrations[0]?.entry
-  assert.equal(entry?.['name'], 'plugins.item')
-  assert.equal(entry?.['id'], ENTRY_ID)
+  assert.equal(entry?.['name'], 'plugins.bundle.config')
+  assert.equal(entry?.['key'], BUNDLE_NAME)
+  assert.equal(entry?.['id'], undefined)
   assert.equal(entry?.['locale'], NS)
-  assert.equal((entry?.['label'] as () => string)(), 't:title')
 })
 
 test('the card stages the four served fields as typed writes', { skip: artifact === undefined }, () => {
