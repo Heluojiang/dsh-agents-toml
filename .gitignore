@@ -1,0 +1,10 @@
+# Installed dependencies
+node_modules/
+
+# Build output: `prepare` rebuilds it from src/ on install
+lib/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.tsbuildinfo

@@ -1,0 +1,11 @@
+# Cheap explorer on a faster model, usable as a persistent continuable child.
+name = "explorer"
+description = "代码库探索与定位：快速找文件、找符号、回答结构性问题。"
+provider = "spawn"
+mode = "continuable"
+llm_provider = "deepseek-official"
+model = "deepseek-v4-flash"
+max_depth = 1
+
+[tools]
+deny = ["write", "edit"]

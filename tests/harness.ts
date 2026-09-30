@@ -1,0 +1,245 @@
+/**
+ * Test doubles for the Harness surface the plugin consumes. Nothing here
+ * imports a Harness package, so the suite runs without a DSH installation and
+ * never touches a real `$DSH_HOME`.
+ * @module dsh-agents-toml/tests/harness
+ */
+import { basename, dirname, resolve } from 'node:path'
+
+import type { DiscoveryIo } from '../src/discovery.ts'
+import type {
+  AgentLike,
+  ContextLike,
+  SubagentCapabilities,
+  SubagentProvider,
+  SubagentResult,
+  SubagentService,
+  SubagentStartRequest,
+  ToolDefinition,
+} from '../src/host.ts'
+
+/** Every start-time feature supported. */
+export const FULL_CAPABILITIES: SubagentCapabilities = {
+  agentOptions: true,
+  outputSchema: true,
+  depthLimit: true,
+  toolFilter: true,
+  persona: true,
+}
+
+/** Out-of-process transport: no start-time features at all. */
+export const NO_CAPABILITIES: SubagentCapabilities = {
+  agentOptions: false,
+  outputSchema: false,
+  depthLimit: false,
+  toolFilter: false,
+  persona: false,
+}
+
+/** One provider to register on the fake service. */
+export interface FakeProviderInit {
+  readonly name: string
+  readonly capabilities?: SubagentCapabilities
+  readonly inheritsParentContext?: boolean
+  readonly continuable?: boolean
+}
+
+/** One observed one-shot run. */
+export interface StartedRun {
+  readonly name: string
+  readonly request: SubagentStartRequest
+  disposed: boolean
+}
+
+/** Fake `ctx.subagents`. */
+export interface FakeSubagents {
+  readonly service: SubagentService
+  readonly started: StartedRun[]
+  readonly continuable: {
+    readonly provider: string
+    readonly label: string
+    readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema'>
+    readonly signal: AbortSignal
+  }[]
+}
+
+/**
+ * Build a fake subagent registry.
+ * @param providers - providers to register.
+ * @param options - terminal result for one-shot runs and the host depth setting.
+ * @returns the service plus the runs it observed.
+ */
+export function createFakeSubagents(
+  providers: readonly FakeProviderInit[],
+  options: { readonly result?: SubagentResult; readonly depth?: number } = {},
+): FakeSubagents {
+  const started: StartedRun[] = []
+  const continuable: FakeSubagents['continuable'][number][] = []
+  const registry = new Map<string, SubagentProvider>()
+  for (const init of providers) {
+    registry.set(init.name, {
+      name: init.name,
+      capabilities: init.capabilities ?? FULL_CAPABILITIES,
+      inheritsParentContext: init.inheritsParentContext ?? false,
+      ...init.continuable === true ? { prepareContinuable: () => Promise.resolve({}) } : {},
+    })
+  }
+  const result: SubagentResult = options.result ?? { output: [{ type: 'text', text: 'done' }], stopReason: 'completed' }
+  const service: SubagentService = {
+    getProvider: name => registry.get(name),
+    list: () => [...registry.keys()],
+    start(name, request) {
+      const entry: StartedRun = { name, request, disposed: false }
+      started.push(entry)
+      return Promise.resolve({
+        id: `run-${started.length}`,
+        result: Promise.resolve(result),
+        dispose: () => {
+          entry.disposed = true
+          return Promise.resolve()
+        },
+      })
+    },
+    startContinuable(spec) {
+      continuable.push(spec)
+      return Promise.resolve({ childId: `child-${continuable.length}`, messageId: 'message-1' })
+    },
+    resolveMaxDepth: () => options.depth ?? 1,
+  }
+  return { service, started, continuable }
+}
+
+/** One tool registration observed on the fake context. */
+export interface RegisteredTool {
+  readonly definition: ToolDefinition
+  disposed: boolean
+}
+
+/** Fake Cordis context. */
+export interface FakeContext {
+  readonly ctx: ContextLike
+  readonly tools: RegisteredTool[]
+  readonly logs: { readonly level: 'warn' | 'info'; readonly message: string }[]
+  readonly fibers: { readonly services: readonly string[]; disposed: boolean }[]
+  readonly cleanups: (() => void)[]
+  /** Agents the fake registry reports; add to it before the plugin activates. */
+  readonly registry: AgentLike[]
+  emitCreated(agent: AgentLike): Promise<void>
+  emitDisposed(agent: AgentLike): void
+}
+
+/**
+ * Build a fake context with a fake subagent registry.
+ * @param subagents - fake service.
+ * @returns the context plus everything it recorded.
+ */
+export function createFakeContext(subagents: SubagentService): FakeContext {
+  const tools: RegisteredTool[] = []
+  const logs: FakeContext['logs'][number][] = []
+  const fibers: FakeContext['fibers'][number][] = []
+  const cleanups: (() => void)[] = []
+  const registry: AgentLike[] = []
+  type Payload = { agent: AgentLike }
+  const listeners = new Map<'agent/created' | 'agent/disposed', ((payload: Payload) => unknown)[]>()
+
+  const ctx: ContextLike = {
+    tools: {
+      register(definition) {
+        const entry: RegisteredTool = { definition, disposed: false }
+        tools.push(entry)
+        return () => { entry.disposed = true }
+      },
+    },
+    subagents,
+    logger: {
+      warn: (...args) => { logs.push({ level: 'warn', message: args.map(String).join(' ') }) },
+      info: (...args) => { logs.push({ level: 'info', message: args.map(String).join(' ') }) },
+    },
+    on(event, listener) {
+      const list = listeners.get(event) ?? []
+      list.push(listener as (payload: Payload) => unknown)
+      listeners.set(event, list)
+      return () => {
+        const index = list.indexOf(listener as (payload: Payload) => unknown)
+        if (index >= 0) list.splice(index, 1)
+      }
+    },
+    get(name) {
+      return name === 'agents' ? { list: () => [...registry] } : undefined
+    },
+    inject(services, callback) {
+      const first = tools.length
+      const fiber = { services, disposed: false }
+      fibers.push(fiber)
+      callback(ctx)
+      const owned = tools.slice(first)
+      return {
+        dispose() {
+          fiber.disposed = true
+          for (const entry of owned) entry.disposed = true
+        },
+      }
+    },
+    effect(callback) {
+      const cleanup = callback()
+      if (typeof cleanup === 'function') cleanups.push(cleanup)
+    },
+  }
+
+  return {
+    ctx,
+    tools,
+    logs,
+    fibers,
+    cleanups,
+    registry,
+    async emitCreated(agent) {
+      for (const listener of [...listeners.get('agent/created') ?? []]) await listener({ agent })
+    },
+    emitDisposed(agent) {
+      for (const listener of [...listeners.get('agent/disposed') ?? []]) listener({ agent })
+    },
+  }
+}
+
+/**
+ * Build an Agent with a working directory.
+ * @param ctx - context the Agent runs in.
+ * @param cwd - session working directory.
+ * @returns the Agent.
+ */
+export function createAgent(ctx: ContextLike, cwd?: string): AgentLike {
+  return { session: { header: { cwd } }, ctx }
+}
+
+/**
+ * In-memory discovery IO, so discovery tests write nothing to disk.
+ * @param files - definition file contents keyed by path.
+ * @param directories - directories that exist.
+ * @returns the fake IO.
+ */
+export function createMemoryIo(
+  files: readonly (readonly [string, string])[],
+  directories: readonly string[],
+): DiscoveryIo {
+  const contents = new Map(files.map(([path, text]) => [resolve(path), text]))
+  const existing = new Set(directories.map(path => resolve(path)))
+  return {
+    listDefinitionFiles(dir) {
+      const root = resolve(dir)
+      return Promise.resolve(
+        [...contents.keys()]
+          .filter(path => dirname(path) === root)
+          .map(path => basename(path))
+          .sort(),
+      )
+    },
+    readFile(file) {
+      const text = contents.get(resolve(file))
+      return text === undefined ? Promise.reject(new Error(`ENOENT: ${file}`)) : Promise.resolve(text)
+    },
+    isDirectory(path) {
+      return Promise.resolve(existing.has(resolve(path)))
+    },
+  }
+}
