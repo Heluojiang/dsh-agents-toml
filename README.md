@@ -33,14 +33,19 @@ dsh plugin --profile web add dsh-agents-toml
 dsh plugin --profile web add github:<you>/dsh-agents-toml
 ```
 
-git 安装拿到的是源码，所以包内自带 `prepare` 脚本（`tsc -p tsconfig.build.json`）。pnpm ≥10 默认拦截依赖的构建脚本，第一次 `add` 会失败并打印需要放行的键；把它写进 `$DSH_HOME/profiles/web/pnpm-workspace.yaml` 后重跑：
+git 安装拿到的是源码，所以包内自带 `prepare` 脚本（`tsc -p tsconfig.build.json`）。pnpm ≥10 默认拦截依赖的构建脚本，第一次 `add` 会失败并打印放行所需的**完整 key**（含 spec 与提交 SHA），例如：
 
-```yaml
+```
+ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED  The git-hosted package "dsh-agents-toml@0.1.0" needs to execute build scripts but is not in the "allowBuilds" allowlist.
 allowBuilds:
-  dsh-agents-toml: true
+  dsh-agents-toml@github:you/dsh-agents-toml#<sha>: true
 ```
 
-**放行构建脚本等于允许该包在你的机器上以你的权限执行代码**：只放行你自己信任的仓库，并尽量固定提交（`github:you/dsh-agents-toml#<sha>`）。
+把**那一整行**追加到 `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml`（该文件已存在，内含 `packages`、`nodeLinker` 等设置 —— **追加，不要覆盖**），然后重跑 `add`。
+
+注意：只写裸包名 `dsh-agents-toml: true` **不足以**放行 git 依赖（pnpm 11 按完整 spec 匹配）；必须用 pnpm 打印的那个 key。
+
+**放行构建脚本等于允许该包在你的机器上以你的权限执行代码**：只放行你自己信任的仓库，并固定提交（`github:you/dsh-agents-toml#<sha>`）以免后续推送改变实际执行的代码。
 
 ### 不改 profile 的临时试用
 
