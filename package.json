@@ -1,6 +1,6 @@
 {
   "name": "dsh-agents-toml",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "DeepSeek Harness plugin: declare named subagents in TOML files under ~/.dsh/agents and <projectRoot>/.dsh/agents",
   "type": "module",
@@ -11,6 +11,7 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -23,14 +24,26 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ],
+      "platform": "web"
     }
   },
   "engines": {
     "node": ">=22.19"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json",
+    "build": "npm run build:host && npm run build:client",
+    "build:host": "tsc -p tsconfig.build.json",
+    "build:client": "tsc -p tsconfig.client.json && node scripts/build-client.mjs",
+    "typecheck": "npm run typecheck:host && npm run typecheck:client",
+    "typecheck:host": "tsc -p tsconfig.json",
+    "typecheck:client": "tsc -p tsconfig.client.json --noEmit",
     "test": "node --test \"tests/**/*.spec.ts\"",
     "check": "npm run typecheck && npm run test",
     "prepare": "npm run build"

@@ -28,6 +28,7 @@
 | 子代理模型路由 | ✅ | `llm_provider` / `model` / `reasoning_effort` / `max_tokens` |
 | 只读子代理 | ⚠️ 近似 | 只能用 `[tools] deny` 限制工具；**权限预设/沙箱/审批不可按定义设置**（见第 11 节） |
 | 失败可视 | ✅ | 日志 warn + 工具描述列出不可用定义 + 调用时明确报错 |
+| 设置页开关 | ✅ | web GUI 插件页的「子代理定义（TOML）」卡片，改 4 个 volatile 字段，保存即生效（见 §3.1） |
 
 ## 3. 插件行配置
 
@@ -49,9 +50,13 @@
 
 `$DSH_HOME` 解析：环境变量 `DSH_HOME`（去空白后非空）优先，否则 `~/.dsh`。
 
-### 3.1 开启项目级子代理（一键脚本）
+### 3.1 开启项目级子代理
 
-项目级定义**默认关闭**：`<projectRoot>/.dsh/agents/*.toml` 随仓库分发，必须显式信任。**插件页没有本插件的配置表单** —— 第三方插件的配置页需要插件自带客户端半边（官方那几个配置页都是这么做的），通用配置页尚未提供（见 §11）。因此使用下面的脚本，或让 Creator 模式下的 agent 通过 `plugin_manager` 代改。
+项目级定义**默认关闭**：`<projectRoot>/.dsh/agents/*.toml` 随仓库分发，必须显式信任。
+
+**首选：插件页开关。** 本插件自带客户端半边，web GUI 的插件页会出现「子代理定义（TOML）」配置页，可切换 `trustProjectAgents`、`toolName`、`watchDefinitions`、`reportFailuresToModel`；保存写入当前 profile 的 Cordis 补丁。这四个字段是 Host 的 volatile 引用，`src/plugin.ts` 每次读取时取当前值，因此**不需要重挂载该行**：下一次委派即按新设置执行（工具描述里的 `agent_type` 枚举在下一次安装时刷新）。
+
+**脚本化/无 GUI：** 用下面的幂等脚本改写 profile 补丁，或让 Creator 模式下的 agent 通过 `plugin_manager` 代改。
 
 ```powershell
 $profileName = 'web'                                                    # 你的 profile 名
@@ -86,7 +91,7 @@ if (-not (Test-Path $manifest)) {
 
 脚本会先确认该 profile 确实装了本插件（否则 `- id: dsh-agents-toml` 指向不存在的行，`--dump-config` 打印 `patch: entry "dsh-agents-toml" not found`）；已配置则跳过；**默认的空补丁 `[]` 用替换而非追加** —— 在流式空序列后追加块序列会让 YAML 解析失败。
 
-生效时机：写入后对**新任务/新会话**立即生效；开启 HMR 的 profile（`web` 默认）无需重启，因为补丁文件被监听；已存在的 Agent 不会自动重装工具。验证：
+生效时机（脚本改写补丁这条路）：开启 HMR 的 profile（`web` 默认）会重载该行，关闭 HMR 的 profile 需要重启；工具描述里的 `agent_type` 枚举在下一次安装（新建任务/新会话，或定义文件变化）时刷新。验证：
 
 ```powershell
 dsh --profile web --dump-config > $env:TEMP\dump.txt
@@ -250,7 +255,8 @@ deny = ["write", "edit"]              # 可选
 - **子代理工作目录不可按定义设置**：继承父会话 cwd（`acp`/`dsh-sdk` 的 provider 行可整体覆盖）。
 - **不能给子代理增加工具**：`[tools]` 只能做减法。
 - **未暴露 `run_in_background`**：后台语义由定义的 `mode` 决定。
-- **无设置页开关**：项目级信任只能通过插件行 config 显式开启（一键脚本见 §3.1）。原因：Host 的 `dsh-settings` 只把 `.volatile()` 字段做成可编辑表单，而客户端侧每个官方配置页都是一个伴生客户端包（`ctx.configForms.whileServed` + `plugins.item` 插槽），schema 驱动的通用配置页尚无客户端实现。要提供 UI 开关，需为本插件增加客户端半边。
+- **设置页开关已提供，但不通用**：web GUI 的插件页有本插件自己的配置页（客户端半边），可切换项目级信任、工具名、目录监听与失败上报（见 §3.1）。它**不是**通用的 schema 驱动表单：Host 的 `dsh-settings` 只把 `.volatile()` 字段做成可编辑表单，而每个配置页都是插件自带的客户端包（`ctx.configForms.whileServed` + `plugins.item` 插槽）——通用页面目前没有客户端实现，所以任何插件想要 UI 都得自带半边。
+- **`defaultProvider` / `projectAgentsDir` / `userAgentsDir` 不在设置页**：这些是部署布局，不是每用户偏好，只能在插件行 config 里改（因此它们也不是 volatile）。
 - **工具名写错只能在调用期发现**：DSH 未暴露可枚举的全局工具名清单，因此无法在安装期预检 `[tools]` 名字。
 - **`continuable` 不支持 `output_schema`**：该能力只适用于一次性运行。
 
@@ -265,16 +271,20 @@ deny = ["write", "edit"]              # 可选
 | `src/mapping.ts` | 能力位校验、启动请求构造、结果映射 |
 | `src/tool.ts` | 工具 schema、入参校验、委派执行 |
 | `src/host.ts` | 宿主 ctx 的结构性类型声明（**不 import 任何 `@deepseek-ai/dsh-*`**） |
+| `src/client/index.tsx` | 客户端半边：插件页配置卡片（`configForms.whileServed` + `plugins.item`），单文件以便 `tsc` 直出 |
+| `src/client/shell-modules.d.ts` | 浏览器模块表的契约声明（react、jsx-runtime、ui-primitives、client/store） |
+| `scripts/build-client.mjs` | 把 CJS 产物包装成 `window.__ModuleLoader__.load({id, factory})` 并校验自洽 |
 
 宿主契约：`ctx.tools.register`、`ctx.subagents.{getProvider,list,start,startContinuable,resolveMaxDepth?}`、`ctx.on('agent/created'|'agent/disposed')`、`ctx.inject`、`ctx.get('agents')`、`ctx.logger`、`ctx.effect`。
-运行时依赖仅 `@deepseek-ai/schemastery`（Config schema）与 `smol-toml`；构建用 `tsc` 产出 ESM + `.d.ts`。
+客户端契约：`ctx.slots.{inject,register}`、`ctx.locale.{bind,register}`、`ctx.configForms.{get,whileServed}`、`ctx.effect`。
+运行时依赖仅 `@deepseek-ai/schemastery`（Config schema）与 `smol-toml`；构建用 `tsc` 产出 ESM + `.d.ts`，客户端半边用 `tsc`（CJS）+ `scripts/build-client.mjs` 产出 `lib/client.js`，**不需要打包器**。
 
 ## 13. 测试
 
 ```sh
-npm run check   # tsc 类型检查 + node --test
+npm run check   # tsc 类型检查（宿主 + 客户端两个面）+ node --test
 ```
 
-61 个单测覆盖：TOML 解析与全部校验分支、目录优先级与重名、能力位矩阵、请求映射（含 continuable 字段裁剪）、工具 schema 与入参校验、委派成功/失败/取消、按 Agent 安装与释放、watcher 重装、卸载清理、激活前已存在 Agent 的补装。
+67 个单测覆盖：TOML 解析与全部校验分支、目录优先级与重名、能力位矩阵、请求映射（含 continuable 字段裁剪）、工具 schema 与入参校验、委派成功/失败/取消、按 Agent 安装与释放、watcher 重装、卸载清理、激活前已存在 Agent 的补装、设置写入后无需重挂载即生效（volatile 惰性读取），以及客户端产物的加载器握手、导出契约、卡片渲染与开关暂存（`lib/client.js` 缺失时自跳过）。
 
 测试使用假 `ctx` 与内存文件系统，**不启动 DSH、不读写真实 `$DSH_HOME`**。

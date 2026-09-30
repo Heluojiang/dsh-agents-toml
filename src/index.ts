@@ -19,33 +19,51 @@ export const name = 'dsh-agents-toml'
 /** The services this plugin needs before it can serve delegation. */
 export const inject = ['tools', 'subagents']
 
+/**
+ * A configuration field the Host samples at runtime: the Loader hands plugins a
+ * stable reference rather than a copy, so a consumer reads it with `get()`.
+ * Structural twin of the Harness `Volatile<T>` the schema builder produces.
+ */
+interface VolatileField<T> {
+  /** @returns the current value, after schema defaults are resolved. */
+  get(): T
+}
+
 /** Configuration accepted from `cordis.yml`. */
 export interface Config {
   /** Allow `<projectRoot>/.dsh/agents/*.toml`, which arrives with a git clone. */
-  trustProjectAgents: boolean
+  trustProjectAgents: VolatileField<boolean>
   /** Model-facing tool name. */
-  toolName: string
+  toolName: VolatileField<string>
   /** Transport used by definitions that name none. */
   defaultProvider: string
   /** Project-relative definition directory. */
   projectAgentsDir: string
   /** Re-install the tool when definition files change. */
-  watchDefinitions: boolean
+  watchDefinitions: VolatileField<boolean>
   /** List unavailable definitions in the tool description. */
-  reportFailuresToModel: boolean
+  reportFailuresToModel: VolatileField<boolean>
   /** Absolute override for the user definition directory. */
-  userAgentsDir?: string
+  userAgentsDir: VolatileField<string | undefined>
 }
 
-/** Configuration schema; invalid values fail the load with an actionable error. */
-export const Config: Schema<Config> = Schema.object({
-  trustProjectAgents: Schema.boolean().default(false),
-  toolName: Schema.string().default('subagent_custom'),
+/**
+ * Configuration schema; invalid values fail the load with an actionable error.
+ *
+ * The four fields the client settings card edits are `.volatile()`: the Host
+ * serves a form only for volatile fields, the card addresses this profile entry
+ * by id (`dsh-agents-toml`), and a write persists into the active profile's
+ * Cordis patch, which reloads this row. The remaining fields stay patch-only
+ * because they address deployment layout rather than a per-user preference.
+ */
+export const Config = Schema.object({
+  trustProjectAgents: Schema.boolean().default(false).volatile(),
+  toolName: Schema.string().default('subagent_custom').volatile(),
   defaultProvider: Schema.string().default('spawn'),
   projectAgentsDir: Schema.string().default('.dsh/agents'),
-  watchDefinitions: Schema.boolean().default(true),
-  reportFailuresToModel: Schema.boolean().default(true),
-  userAgentsDir: Schema.string(),
+  watchDefinitions: Schema.boolean().default(true).volatile(),
+  reportFailuresToModel: Schema.boolean().default(true).volatile(),
+  userAgentsDir: Schema.string().volatile(),
 })
 
 /**
@@ -55,12 +73,12 @@ export const Config: Schema<Config> = Schema.object({
  */
 export function apply(ctx: ContextLike, config: Config): void {
   createPlugin(ctx, {
-    trustProjectAgents: config.trustProjectAgents,
-    toolName: config.toolName,
+    trustProjectAgents: () => config.trustProjectAgents.get(),
+    toolName: () => config.toolName.get(),
     defaultProvider: config.defaultProvider,
     projectAgentsDir: config.projectAgentsDir,
-    watchDefinitions: config.watchDefinitions,
-    reportFailuresToModel: config.reportFailuresToModel,
-    userAgentsDir: config.userAgentsDir,
+    watchDefinitions: () => config.watchDefinitions.get(),
+    reportFailuresToModel: () => config.reportFailuresToModel.get(),
+    userAgentsDir: config.userAgentsDir.get(),
   })
 }

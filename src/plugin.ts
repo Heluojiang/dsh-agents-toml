@@ -17,20 +17,26 @@ import { discoverAgents, nodeDiscoveryIo, type DiscoveryIo, type DiscoveryResult
 import type { AgentLike, AgentRegistryLike, ContextLike, FiberLike } from './host.ts'
 import { buildDelegationTool } from './tool.ts'
 
-/** Resolved plugin configuration. */
+/**
+ * Resolved plugin configuration.
+ *
+ * The four `.volatile()` settings are accessors rather than values: the Host
+ * keeps one stable reference per field and updates it in place when a settings
+ * form writes, so a captured value would stay stale for the life of the row.
+ */
 export interface PluginConfig {
-  /** Whether `<projectRoot>/.dsh/agents` may contribute definitions. */
-  readonly trustProjectAgents: boolean
-  /** Model-facing tool name. */
-  readonly toolName: string
+  /** Whether `<projectRoot>/.dsh/agents` may contribute definitions; read per discovery. */
+  readonly trustProjectAgents: () => boolean
+  /** Model-facing tool name; read at each tool install. */
+  readonly toolName: () => string
   /** Transport used by definitions that name none. */
   readonly defaultProvider: string
   /** Project-relative definition directory. */
   readonly projectAgentsDir: string
-  /** Whether definition directories are watched for live schema updates. */
-  readonly watchDefinitions: boolean
-  /** Whether unavailable definitions are listed in the tool description. */
-  readonly reportFailuresToModel: boolean
+  /** Whether definition directories are watched; read whenever a watch is opened. */
+  readonly watchDefinitions: () => boolean
+  /** Whether unavailable definitions are listed in the tool description; read at each install. */
+  readonly reportFailuresToModel: () => boolean
   /** Absolute override for the user definition directory. */
   readonly userAgentsDir?: string | undefined
 }
@@ -101,7 +107,7 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
     cwd: agent?.session.header.cwd,
     homeDir,
     projectAgentsDir: config.projectAgentsDir,
-    trustProjectAgents: config.trustProjectAgents,
+    trustProjectAgents: config.trustProjectAgents(),
     userAgentsDir: config.userAgentsDir,
     io,
   })
@@ -113,7 +119,7 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
       reportedFailures.add(key)
       ctx.logger.warn(`dsh-agents-toml: ${failure.file}: ${failure.reason}`)
     }
-    if (!config.trustProjectAgents && discovery.projectRoot !== undefined) {
+    if (!config.trustProjectAgents() && discovery.projectRoot !== undefined) {
       const directory = resolve(discovery.projectRoot, config.projectAgentsDir)
       if (!reportedUntrusted.has(directory)) {
         reportedUntrusted.add(directory)
@@ -126,7 +132,7 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
   }
 
   const ensureWatchers = (directories: readonly string[]): void => {
-    if (!config.watchDefinitions) return
+    if (!config.watchDefinitions()) return
     for (const directory of directories) {
       if (watchers.has(directory)) continue
       watchers.set(directory, openWatch(directory, scheduleReinstall))
@@ -152,9 +158,9 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
     if (available.length === 0) return
     const fiber = agent.ctx.inject(['tools', 'subagents'], (scoped) => {
       scoped.tools.register(buildDelegationTool({
-        toolName: config.toolName,
+        toolName: config.toolName(),
         defaultProvider: config.defaultProvider,
-        reportFailuresToModel: config.reportFailuresToModel,
+        reportFailuresToModel: config.reportFailuresToModel(),
         subagents: scoped.subagents,
         load,
         installedNames: available.map(definition => definition.name),
@@ -164,7 +170,7 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
     installs.set(agent, fiber)
     ctx.logger.info(
       `dsh-agents-toml: installed ${available.length} subagent definition(s) for `
-      + `${agent.session.header.cwd ?? '(no working directory)'} as "${config.toolName}"`,
+      + `${agent.session.header.cwd ?? '(no working directory)'} as "${config.toolName()}"`,
     )
   }
 

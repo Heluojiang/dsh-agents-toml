@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "module": "commonjs",
+    "moduleResolution": "node10",
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM"],
+    "types": [],
+    "verbatimModuleSyntax": false,
+    "allowImportingTsExtensions": false,
+    "rewriteRelativeImportExtensions": false,
+    "erasableSyntaxOnly": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "rootDir": "src/client",
+    "outDir": "lib/client-build"
+  },
+  "include": ["src/client/**/*"],
+  "exclude": ["lib"]
+}

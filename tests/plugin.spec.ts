@@ -61,19 +61,42 @@ interface Bench {
   readonly watches: Watch[]
 }
 
-function config(overrides: Partial<PluginConfig> = {}): PluginConfig {
+/** Test-side configuration: a volatile setting may be given as a value or as its accessor. */
+interface ConfigOverrides {
+  trustProjectAgents?: boolean | (() => boolean)
+  toolName?: string | (() => string)
+  defaultProvider?: string
+  projectAgentsDir?: string
+  watchDefinitions?: boolean | (() => boolean)
+  reportFailuresToModel?: boolean | (() => boolean)
+  userAgentsDir?: string
+}
+
+/**
+ * Normalize one setting for the plugin, which reads volatile settings through
+ * the stable reference the Host updates in place.
+ * @param value - plain value, accessor, or nothing.
+ * @param fallback - value used when the test supplies neither.
+ * @returns the accessor the plugin reads.
+ */
+function setting<T>(value: T | (() => T) | undefined, fallback: T): () => T {
+  if (typeof value === 'function') return value as () => T
+  return () => (value === undefined ? fallback : value)
+}
+
+function config(overrides: ConfigOverrides = {}): PluginConfig {
   return {
-    trustProjectAgents: false,
-    toolName: 'subagent_custom',
-    defaultProvider: 'spawn',
-    projectAgentsDir: '.dsh/agents',
-    watchDefinitions: true,
-    reportFailuresToModel: true,
-    ...overrides,
+    trustProjectAgents: setting(overrides.trustProjectAgents, false),
+    toolName: setting(overrides.toolName, 'subagent_custom'),
+    defaultProvider: overrides.defaultProvider ?? 'spawn',
+    projectAgentsDir: overrides.projectAgentsDir ?? '.dsh/agents',
+    watchDefinitions: setting(overrides.watchDefinitions, true),
+    reportFailuresToModel: setting(overrides.reportFailuresToModel, true),
+    ...(overrides.userAgentsDir === undefined ? {} : { userAgentsDir: overrides.userAgentsDir }),
   }
 }
 
-function bench(overrides: Partial<PluginConfig> = {}, debounceMs = 0): Bench {
+function bench(overrides: ConfigOverrides = {}, debounceMs = 0): Bench {
   const io = new MemoryIo()
   const fake = createFakeContext(createFakeSubagents([{ name: 'spawn', capabilities: FULL_CAPABILITIES }]).service)
   const watches: Watch[] = []
@@ -209,6 +232,28 @@ describe('createPlugin', () => {
     await created(b.fake)
     assert.equal(b.fake.tools.length, 1)
     assert.equal(b.watches.length, 0)
+  })
+
+  it('re-reads the trust setting on every discovery, so a settings write applies without a remount', async () => {
+    // The Host keeps one volatile reference per setting and updates it in place
+    // when a settings form writes; nothing disposes and re-applies this row.
+    let trusted = false
+    const io = new MemoryIo()
+    const fake = createFakeContext(createFakeSubagents([{ name: 'spawn', capabilities: FULL_CAPABILITIES }]).service)
+    io.mkdir(USER_DIR)
+    io.mkdir(GIT_DIR)
+    io.mkdir(PROJECT_DIR)
+    io.write(join(USER_DIR, 'reviewer.toml'), definition('reviewer'))
+    io.write(join(PROJECT_DIR, 'explorer.toml'), definition('explorer'))
+    createPlugin(fake.ctx, config({ trustProjectAgents: () => trusted }), { io, homeDir: HOME, debounceMs: 0 })
+
+    await created(fake)
+    assert.deepEqual(enumOf(fake.tools[0]!.definition), ['reviewer'])
+
+    trusted = true
+    await created(fake)
+    assert.equal(fake.tools.length, 2)
+    assert.deepEqual(enumOf(fake.tools[1]!.definition), ['reviewer', 'explorer'])
   })
 
   it('closes watchers when the plugin unloads', async () => {

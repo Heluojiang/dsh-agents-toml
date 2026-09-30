@@ -25,7 +25,9 @@ dsh plugin --profile web add D:\Work\Codes\Others\dsh-agents-toml
 dsh plugin --profile web add dsh-agents-toml
 ```
 
-> 当前 `package.json` 里保留了 `private: true`（开发态防误发布）。要发布到 npm，删掉该字段后 `npm publish`；`prepare` 脚本会先构建。
+> 当前 `package.json` 里保留了 `private: true`（开发态防误发布）。要发布到 npm，删掉该字段后 `npm publish`；`prepare` 脚本会先构建（宿主 + 客户端两个面）。
+
+安装后，**web profile 会自动加载本插件的客户端半边**（`dsh.client` 清单 + `./client` 导出，构建产物 `lib/client.js`），无需额外步骤；`headless` / `sdk` / `acp` 等没有 GUI 的 profile 会忽略它。
 
 ### GitHub
 
@@ -72,15 +74,30 @@ dsh web --patch ./dev.patch.yml
 |---|---|---|
 | 安装/卸载本插件 bundle | 不需要重启：DSH 监听 profile 的 `package.json`（`dsh.profile.bundles`）与 patch 文件并在变化时重组 | 需要重启 |
 | 新增/修改 `*.toml` 定义 | 不需要重启（下次调用即生效；watcher 会刷新工具 schema） | 同左 |
-| 升级本插件自身版本 | 已加载的模块实例不会热替换，建议重启 | 需要重启 |
+| 在**插件页设置**里改配置 | 不需要重启：volatile 引用原地更新，下一次委派即生效（仅 `agent_type` 枚举等要等下一次安装） | 不适用（无 GUI） |
+| 手改 `cordis.patch.yml` | 不需要重启（补丁文件被监听，该行重载） | 需要重启 |
+| 升级本插件自身版本（含客户端半边） | Host 模块不会热替换，建议重启；浏览器刷新会重新拉取 `lib/client.js` | 需要重启 |
 
 ## 开启项目级子代理（装完必看）
 
 **项目级定义默认是关闭的。** `<projectRoot>/.dsh/agents/*.toml` 会随 `git clone` 一起到来，所以插件默认只加载用户级 `$DSH_HOME/agents/*.toml`，必须显式信任才读取项目目录（忽略时会打印一行 info 日志说明）。
 
-> 插件页目前**没有**本插件的配置表单 —— 第三方插件的配置页需要各插件自带客户端半边（官方那几个配置页都是这么做的），通用配置页尚未提供（依据见 [docs/FEATURES.md](docs/FEATURES.md) 第 11 节）。所以现在用下面的一键脚本，或让 Creator 模式下的 agent 代改。
+### 方式一：设置页开关（web GUI，推荐）
 
-### 一键开启（PowerShell，幂等）
+本插件自带客户端半边，**插件页**里会出现自己的配置页（与官方"子智能体"等页面同级）。打开「插件」→「子代理定义（TOML）」即可切换：
+
+| 控件 | 对应配置 | 说明 |
+|---|---|---|
+| 信任项目级定义 | `trustProjectAgents` | 打开后加载 `<项目根>/.dsh/agents/*.toml` |
+| 工具名 | `toolName` | 模型看到的委派工具名（默认 `subagent_custom`） |
+| 监听定义目录 | `watchDefinitions` | 文件变化后重装工具、刷新 `agent_type` 枚举 |
+| 在工具描述里列出不可用定义 | `reportFailuresToModel` | 让模型看到被跳过的定义及原因 |
+
+保存即写入当前 profile 的 Cordis 补丁，**无需重启**：这几个字段是 Host 的 volatile 引用，插件每次读取时取当前值——下一次委派就按新设置走（实测：关掉开关后工具描述里的项目级定义立即消失，打开后立即回来）。
+
+### 方式二：直接改 profile 补丁（无 GUI / 需要脚本化时）
+
+一键脚本（PowerShell，幂等）：
 
 ```powershell
 $profileName = 'web'                                                    # 你的 profile 名
@@ -116,7 +133,7 @@ if (-not (Test-Path $manifest)) {
 
 脚本做三件事：确认该 profile 真的装了本插件（否则 `- id: dsh-agents-toml` 会指向不存在的行，`--dump-config` 打印 `patch: entry "dsh-agents-toml" not found`）；已在则跳过（幂等）；**空补丁 `[]` 用替换而不是追加**，避免 YAML 解析失败。
 
-写入后对**新任务/新会话**立即生效；开启 HMR 的 profile（`web` 默认开启）无需重启，因为补丁文件被监听。已经存在的会话/Agent 不会自动重装工具，**新建一个任务**即可。
+生效时机：手改补丁后，开启 HMR 的 profile（`web` 默认）会重载该行，关闭 HMR 的 profile 需要重启；工具描述里的 `agent_type` 枚举在**下一次安装**（新建任务/新会话，或定义文件变化）时刷新。相比之下，**插件页开关**走 Host 的 volatile 引用原地更新，下一次委派就按新设置执行，不需要重载。
 
 ### 验证
 
@@ -135,7 +152,7 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,6
     trustProjectAgents: true
 ```
 
-### 另外两种方式
+### 其余方式
 
 - **临时试用**：`dsh web --patch .\trust-project.patch.yml`（文件内容同上，不改 profile）。
 - **让 agent 代改**：启用 Creator 模式后说"把 dsh-agents-toml 的 trustProjectAgents 打开"，它通过 `plugin_manager` 写入当前 profile。
