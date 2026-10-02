@@ -257,14 +257,14 @@ npm run test      # 只跑测试；pretest 会先重建 lib/client.js
 - **68 个单测**覆盖：TOML 解析与全部校验分支、目录优先级与重名、能力位矩阵、请求映射（含 continuable 的字段裁剪）、工具 schema 与入参校验、委派成功/失败/取消、按 Agent 安装与释放、watcher 重装、卸载清理、激活前已存在 Agent 的补装、volatile 惰性读取（设置写入后无需重挂载即生效）。
 - **产物级测试**（`tests/client-artifact.spec.ts`）在 Node 里用桩模块表执行真实的 `lib/client.js`，断言：加载器握手格式、导出契约（`apply`/`inject`/`NS`/`ENTRY_ID`/`BUNDLE_NAME`）、**只注册 `plugins.bundle.config` 一个插槽且键为 bundle 包名**（不得出现 `plugins.item`）、卡片渲染与开关暂存。产物缺失时该测试自跳过。
 - 测试使用假 `ctx` 与内存文件系统，**不启动 DSH、不读写真实 `$DSH_HOME`**。
-- 发布注意：`package.json` 的 `private: true` 是开发态防误发布；`files` 需要覆盖运行时会用到的全部相对产物与文档（`lib`、`cordis.patch.yml`、`README.md`、`guide`）。
+- 发布注意：`publishConfig.access: public` 是 scoped 包公开发布所必需的（默认 restricted）；`files` 需要覆盖运行时会用到的全部相对产物与文档（`lib`、`assets`、`cordis.patch.yml`、`README.md`、`guide`）；`prepublishOnly` 会在发布前跑完整 `check`。
 
 ## 14. 安装路径与构建脚本放行
 
 | 路径 | 行为 |
 |---|---|
 | `dsh plugin add <本地目录>` | 以 link 方式加入 profile；改代码后重启该进程即可生效 |
-| `dsh plugin add dsh-agents-toml` | 走 npm 包（发布后） |
+| `dsh plugin add @heluojiang/dsh-agents-toml` | 走 npm 注册表，装的是已构建产物 |
 | `dsh plugin add github:<you>/dsh-agents-toml#<sha>` | 克隆源码后在包内执行 `prepare`（= `npm run build`），因此安装副本自带 `lib/`（含客户端半边） |
 
 pnpm ≥10 默认拦截依赖的构建脚本：第一次 `add` 会以 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` 失败，并打印放行所需的**完整 key**（被规范化成 codeload tarball URL 且带提交 SHA）。把它追加到 `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml` 的 `allowBuilds:` 下再重跑。只写裸包名不足以放行；SHA 随提交变化，更新提交后要补新 key。放行构建脚本等同于允许该包以你的权限执行代码，因此只放行自己信任的仓库并固定提交。

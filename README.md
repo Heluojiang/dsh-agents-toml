@@ -17,20 +17,20 @@
 dsh plugin --profile web add D:\Work\Codes\Others\dsh-agents-toml
 ```
 
-### npm（发布后）
+### npm
 
 ```sh
-dsh plugin --profile web add dsh-agents-toml
+dsh plugin --profile web add @heluojiang/dsh-agents-toml
 ```
 
-> `package.json` 里保留了 `private: true`（开发态防误发布）。要发布到 npm，删掉该字段后 `npm publish`；`prepare` 脚本会先构建（宿主 + 客户端两个面）。
+> 包已发布到 npm（scoped 包 `publishConfig.access: public`，因此公开可装）。从 npm 装到的是**构建产物**（`lib/`、`assets/skill/`、`cordis.patch.yml`、文档）；`prepare` 在发布时已构建宿主与客户端两个面。
 
 安装后，**web profile 会自动加载本插件的客户端半边**（`dsh.client` 清单 + `./client` 导出，产物 `lib/client.js`），无需额外步骤；`headless` / `sdk` / `acp` 等没有 GUI 的 profile 会忽略它。
 
 ### GitHub
 
 ```sh
-dsh plugin --profile web add github:<you>/dsh-agents-toml
+dsh plugin --profile web add github:Heluojiang/dsh-agents-toml
 ```
 
 git 安装拿到的是源码，包内自带 `prepare` 脚本。pnpm ≥10 默认拦截依赖的构建脚本，第一次 `add` 会失败并打印放行所需的**完整 key**：
@@ -108,7 +108,7 @@ $block = @(
 
 if (-not (Test-Path $manifest)) {
   "profile 不存在：$manifest —— 先用 dsh --profile $profileName ... 初始化它"
-} elseif (-not ((Get-Content $manifest -Raw | ConvertFrom-Json).dsh.profile.bundles -contains 'dsh-agents-toml')) {
+} elseif (-not ((Get-Content $manifest -Raw | ConvertFrom-Json).dsh.profile.bundles -contains '@heluojiang/dsh-agents-toml')) {
   "该 profile 还没安装本插件，先运行：dsh plugin --profile $profileName add github:<you>/dsh-agents-toml"
 } elseif ((Get-Content $patch -Raw) -match 'trustProjectAgents') {
   "已存在 trustProjectAgents 配置，未修改：$patch"

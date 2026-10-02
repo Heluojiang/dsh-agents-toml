@@ -1,8 +1,8 @@
-# Bundle layer contributed by dsh-agents-toml.
+# Bundle layer contributed by @heluojiang/dsh-agents-toml.
 #
 # The row is inserted at the profile's host plane, where it observes every
 # Agent through `agent/created` and installs the delegation tool into each
 # Agent's own scope. Nothing here requires a preset edit.
 - insert:
     - id: dsh-agents-toml
-      name: dsh-agents-toml
+      name: '@heluojiang/dsh-agents-toml'

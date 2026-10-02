@@ -1,7 +1,6 @@
 {
-  "name": "dsh-agents-toml",
+  "name": "@heluojiang/dsh-agents-toml",
   "version": "0.2.0",
-  "private": true,
   "description": "DeepSeek Harness plugin: declare named subagents in TOML files under ~/.dsh/agents and <projectRoot>/.dsh/agents",
   "type": "module",
   "main": "lib/index.js",
@@ -19,9 +18,30 @@
     "assets",
     "cordis.patch.yml",
     "README.md",
-    "guide"
+    "guide",
+    "LICENSE"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Heluojiang/dsh-agents-toml.git"
+  },
+  "homepage": "https://github.com/Heluojiang/dsh-agents-toml#readme",
+  "bugs": {
+    "url": "https://github.com/Heluojiang/dsh-agents-toml/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "subagent",
+    "agents",
+    "toml",
+    "cordis"
+  ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -49,7 +69,8 @@
     "test": "node --test \"tests/**/*.spec.ts\"",
     "check:docs": "node scripts/check-docs.mjs",
     "check": "npm run typecheck && npm run check:docs && npm run test",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run check"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4",

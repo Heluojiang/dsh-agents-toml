@@ -31,9 +31,11 @@ export const ENTRY_ID = 'dsh-agents-toml'
  * Package name of the bundle this client half belongs to: the key
  * `plugins.bundle.config` dispatches on. Spelled separately from
  * {@link ENTRY_ID} because one names a Host row's form and the other names the
- * installed bundle whose page carries it.
+ * installed bundle whose page carries it — and it **must equal the manifest's
+ * `name`**, because the Plugins page dispatches the keyed slot by the package
+ * name it read from `package.json`.
  */
-export const BUNDLE_NAME = 'dsh-agents-toml'
+export const BUNDLE_NAME = '@heluojiang/dsh-agents-toml'
 
 /** Dictionary namespace owned by this plugin's client half. */
 export const NS = 'settings.dsh-agents-toml'

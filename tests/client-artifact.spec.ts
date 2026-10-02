@@ -14,8 +14,11 @@ import { test } from 'node:test'
 const artifactUrl = new URL('../lib/client.js', import.meta.url)
 const artifact = existsSync(artifactUrl) ? readFileSync(artifactUrl, 'utf8') : undefined
 
+/** The manifest name: the module-table id and the `plugins.bundle.config` key. */
+const PACKAGE_NAME = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string }).name
+
 const ENTRY_ID = 'dsh-agents-toml'
-const BUNDLE_NAME = 'dsh-agents-toml'
+const BUNDLE_NAME = PACKAGE_NAME
 const NS = 'settings.dsh-agents-toml'
 const FIELDS = ['trustProjectAgents', 'toolName', 'watchDefinitions', 'reportFailuresToModel']
 
@@ -208,7 +211,7 @@ function collect(node: unknown, type: unknown): Element[] {
 
 test('the artifact registers one module through the loader handoff', { skip: artifact === undefined }, () => {
   assert.ok(artifact !== undefined)
-  assert.match(artifact, /window\.__ModuleLoader__\.load\(\{ id: "dsh-agents-toml", factory: \(require\) => \{/)
+  assert.match(artifact, new RegExp(`window\\.__ModuleLoader__\\.load\\(\\{ id: ${JSON.stringify(PACKAGE_NAME)}, factory: \\(require\\) => \\{`))
   assert.doesNotMatch(artifact, /require\((["'])\.\.?\//)
 })
 
@@ -225,12 +228,24 @@ test('the served bundle addresses exactly one slot, keyed by its bundle', { skip
 
 test('the module exports the plugin protocol the shell loads', { skip: artifact === undefined }, () => {
   const observed = loadArtifact()
-  assert.equal(observed.handoffId, ENTRY_ID)
+  assert.equal(observed.handoffId, PACKAGE_NAME)
   assert.deepEqual(observed.module.inject, ['slots', 'locale', 'configForms'])
   assert.equal(observed.module.NS, NS)
   assert.equal(observed.module.ENTRY_ID, ENTRY_ID)
-  assert.equal(observed.module.BUNDLE_NAME, BUNDLE_NAME)
+  // The manifest name is the module-table id: a rename that misses here would
+  // make the shell load the artifact under a name nothing requested.
+  assert.equal(observed.module.BUNDLE_NAME, PACKAGE_NAME)
   assert.equal(typeof observed.module.apply, 'function')
+})
+
+test('the manifest name is the row name, the loader id, and the config key', { skip: artifact === undefined }, () => {
+  assert.ok(artifact !== undefined)
+  const row = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+  // A row naming a package the manifest does not declare fails to import, and a
+  // keyed config registration that disagrees with the package name never
+  // renders on the bundle's page.
+  assert.match(row, new RegExp(`name: '${PACKAGE_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
+  assert.match(artifact, new RegExp(`window\\.__ModuleLoader__\\.load\\(\\{ id: ${JSON.stringify(PACKAGE_NAME)}, factory:`))
 })
 
 test('apply registers dictionaries, the served form, and one bundle-page section', { skip: artifact === undefined }, () => {
