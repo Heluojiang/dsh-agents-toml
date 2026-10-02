@@ -36,6 +36,16 @@ test('the packaged asset parses into a described body without its frontmatter', 
   assert.match(asset.content, /max_depth/)
 })
 
+test('the asset states how a continuable run reports back, since that decides the persona', () => {
+  const { content } = readSkillAsset()
+  // The settlement notice is what the parent actually receives, so the authoring
+  // guide must say so where it describes the mode and where it tells the model
+  // how to write the persona.
+  assert.match(content, /settlement notice/)
+  assert.match(content, /closing message/)
+  assert.match(content, /## 4b\. Writing the `persona` for the mode you chose/)
+})
+
 test('a frontmatter name that disagrees with the registered one is rejected', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-agents-toml-skill-'))
   try {

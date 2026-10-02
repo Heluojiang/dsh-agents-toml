@@ -49,7 +49,7 @@ deny = ["write", "edit", "pwsh"]
 | `name` | yes | `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; kebab-case by convention |
 | `description` | yes | non-empty; the model's routing hint |
 | `enabled` | no | `false` hides it from the tool while keeping the file |
-| `mode` | no | `"one-shot"` (default) waits for the child and returns its text; `"continuable"` returns `started subagent <childId>` as soon as the prompt is queued, with no automatic report back (see the pitfall below) |
+| `mode` | no | `"one-shot"` (default) waits for the child and returns its text; `"continuable"` returns `started subagent <childId>` at once, and the child's **final text** arrives later as a settlement notice (see the pitfalls below) |
 | `provider` | no | a transport registered in this profile (`spawn`, `fork`, `acp`, `codex`, `claude-code`, `dsh-sdk`, …); default comes from the plugin row |
 | `llm_provider` / `model` / `reasoning_effort` / `max_tokens` | no | route the child to another model; needs a provider with `agentOptions` (`spawn`/`fork`/`dsh-sdk`) |
 | `persona` | no | extra system prompt for this child only; needs `persona` (`spawn`/`fork`) |
@@ -65,10 +65,20 @@ Hyphens may replace underscores (`max-depth` = `max_depth`). Unknown keys, wrong
 - **Tools that only read** — there is no read-only permission preset per definition. Approximate it with `[tools] deny = ["write", "edit"]` and deny shell tools too (`pwsh` on Windows, `bash`/`terminal` elsewhere). Only `write`/`edit` are portable.
 - **Tool names are deployment-specific** — do not deny `bash` on a Windows profile; it fails loud with the known names. When unsure, deny `write`/`edit` only.
 - **`output_schema` with `mode = "continuable"`** — invalid combination; a structured result belongs to a one-shot run.
-- **`mode = "continuable"` returns a child id, not an answer, and nothing reports back by itself.** The prompt is queued when the call returns; a finished child turn neither messages nor wakes the parent. Its output stays in its own session, so the only way to get it is a message round trip: the child sends `send_message(agent_id = its parent)`, or the parent asks the child. Continuing that same child needs the official subagent control tool (`send_message` with `agent_id`, parent and direct continuable child only) and a profile that enables Agent Teams disables that plugin, mounting a same-named tool that addresses teammates by `target` instead.
+- **`mode = "continuable"` returns a child id, not an answer — and the answer arrives later, from the child's last message only.** The call resolves as soon as the prompt is queued. When the child's turn ends, the continuation manager delivers a settlement notice into the parent's own request: the outcome line (`Background subagent <id> finished and will do no further work unless you send it more.`, or the matching line for stopped / out of room / declined / failed) followed by the nonempty text blocks of the child's **final** assistant output, or `It left no closing message.` An idle parent is woken by it. Nothing else comes back: reasoning, tool output, and anything said mid-run but not in the closing text stay in the child's session. **So a `continuable` definition's `persona` must require the child to put its conclusion in its closing message** — otherwise the parent receives a notice with nothing usable in it. Ask for earlier `send_message(agent_id = <parent id>)` only for findings that must reach the parent before the child finishes; the parent id is injected into the child's task prompt, so the parent never writes it. The parent keeps the ability to follow up with `send_message` (parameter `agent_id`) on the child, which needs the official subagent control tool; a profile that enables Agent Teams disables that plugin and mounts a same-named tool that addresses teammates by `target` instead (the settlement notice itself still arrives).
 - **Model routing on an out-of-process provider** — `acp`/`codex`/`claude-code` accept none of `model`, `persona`, `tools`, `max_depth`, `output_schema`; the definition then fails at call time with the reason.
 - **Long personas** — a persona is not a place for the task itself; keep the task in the `prompt` the caller passes.
 - **This plugin does not support the Agent Teams combination.** If the user asks for team-style multi-agent work, or if the session exposes team tools (`spawn_teammate`, a `send_message` that takes `target`), say that the official Agent Teams bundle replaces the delegation control tools these definitions rely on, and point at the plugin's settings page — it carries a red notice asking for Agent Teams to be turned off. That notice only asks: the user switches the feature off in the Plugins page, and nothing here edits their profile for them.
+
+## 4b. Writing the `persona` for the mode you chose
+
+The persona is the child's system prompt, so it decides what the parent actually receives.
+
+- **`one-shot`** — the parent gets the child's final text as the tool result. Ask for the answer directly: what to report, in what order, and what counts as evidence.
+- **`continuable`** — the parent gets the child id now and the child's **closing message** later. The persona MUST end the run with the conclusion: state explicitly *"put your conclusion in your final message: findings, evidence, open questions"*. A child that explains everything through tool calls and ends with "done" reports nothing the parent can use. Add the early-return rule only when a mid-run finding must reach the parent: *"when a finding changes what the parent should do next, send it now with `send_message(agent_id = <your parent id>)`; sending does not end your turn."*
+- **Both modes** — never put the task itself in the persona (the caller passes `prompt`), never restate the role rules the caller already has, and keep it to the role, its boundaries, and its reporting format.
+
+Mention the mode to the user when you finish: for `continuable`, say the result arrives as a settlement notice after the run and that the conclusion lives in the child's closing message.
 
 ## 5. Report back
 
@@ -77,11 +87,13 @@ After writing the file, tell the user:
 1. the definition name — that is the `agent_type` value to use;
 2. when it takes effect (the next delegation; the tool's list updates at the next tool install, i.e. a new task/session or a definition-file change);
 3. if you wrote into the project directory: that they must enable **信任项目级定义** in the plugin settings first;
-4. how to try it, e.g. *"delegate to `docs-writer` and ask it to document …"*.
+4. how to try it, e.g. *"delegate to `docs-writer` and ask it to document …"*;
+5. for `mode = "continuable"`: that the call returns a child id and the result arrives later as a settlement notice, and that the conclusion is whatever that child puts in its closing message.
 
 ## 6. Templates and deeper reference (relative to this skill's package)
 
 - `guide/reviewer.toml` — one-shot review with persona, structured result, and `write`/`edit` denied.
-- `guide/explorer.toml` — continuable child routed to a faster model.
-- `README.md` — field reference table and the capability matrix per provider.
+- `guide/explorer.toml` — continuable child routed to a faster model (its comment block shows the settlement-notice contract).
+- `README.md` — field reference table, the capability matrix per provider, and the continuable section.
 - `guide/technical.md` — parse rules, capability checks with their exact messages, and limitations.
+- `guide/settings-explained.md` — what each settings switch changes, with scenarios.

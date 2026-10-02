@@ -1,6 +1,6 @@
 {
   "name": "@heluojiang/dsh-agents-toml",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "DeepSeek Harness plugin: declare named subagents in TOML files under ~/.dsh/agents and <projectRoot>/.dsh/agents",
   "type": "module",
   "main": "lib/index.js",

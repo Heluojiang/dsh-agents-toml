@@ -20,11 +20,17 @@ description = "代码库探索与定位：快速找文件、找符号、回答�
 enabled = true
 
 # [可选] 默认 "one-shot"。continuable = 立即返回 `started subagent <childId>`
-#        （入队被接受即返回，这就是本次调用的全部返回值；**没有自动回传**：
-#        子代理跑完不会通知父代理，取产出要靠 send_message 消息往返）。
+#        （入队被接受即返回，这就是本次调用的全部返回值，**结论不在里面**）。
+#        子代理收尾时，宿主会把它的**最终输出文本**作为一条结算通知投递给父会话：
+#          Background subagent <id> finished and will do no further work unless you send it more.
+#          Its closing message:
+#          <子代理最后的文本>
+#        父会话空闲会被唤醒。**只回传收尾消息的文本**：中途的工具输出、推理都不在其中 ——
+#        所以 persona 必须要求子代理把结论写在最后一条消息里（本文件的 persona 就是"检查"，
+#        若要发给父代理，取消下面 persona 段里的收尾发送要求）。
 #        续聊要用官方 `dsh-tool-subagent-control` 的 send_message（参数是 agent_id，
 #        只授权直接父子之间）；若该 profile 启用了 Agent Teams，它会禁用这个控制工具，
-#        换成按 target 寻址队友的同名工具，此时无法续聊本子代理。
+#        换成按 target 寻址队友的同名工具 —— 但上面的结算通知**不受影响**，仍会送达。
 mode = "continuable"
 
 # [可选] 默认取插件行 defaultProvider（默认 spawn）。
@@ -53,6 +59,9 @@ deny = ["write", "edit"]
 # --- 本例未启用的可选键（按需取消注释，注意括号里的约束）---
 # persona = """
 # 只作用于该子代理的补充系统提示，会遮蔽部署 persona。（需要 provider 能力 persona）
+#
+# continuable 定义必须要求子代理把结论写进最后一条消息，否则父会话只会收到一条空通知：
+# 收尾时给出「结论 + 证据（文件/符号/行号）+ 未解决问题」，不要只回一句"完成"。
 # """
 # output_schema = { type = "object", properties = { summary = { type = "string" } }, required = ["summary"] }
 # ↑ 让子代理返回结构化结果（需要 provider 能力 outputSchema），且**只能**配 mode = "one-shot"，

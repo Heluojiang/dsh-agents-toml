@@ -24,7 +24,7 @@
 | 能力校验 | ✅ | 定义用了 provider 不支持的能力 → 该定义判失败并给出原因 |
 | 失败隔离 | ✅ | 单文件失败不影响其他定义，**绝不影响 Agent 创建** |
 | 计划任务/结构化返回 | ✅ | `output_schema`（仅 `one-shot`）→ 子代理返回结构化结果 |
-| 可继续子代理 | ✅ | `mode = "continuable"` → `ctx.subagents.startContinuable()`，在入队被接受时返回 `{childId}`；无隐式回传，取产出靠 `send_message` 往返；该控制工具由官方 `dsh-tool-subagent-control` 提供，本插件不注册 |
+| 可继续子代理 | ✅ | `mode = "continuable"` → `ctx.subagents.startContinuable()`，在入队被接受时返回 `{childId}`；收尾时续接管理器投递**带最终文本的结算通知**给父会话（无文本时说明 `It left no closing message.`），续聊靠官方 `send_message`（本插件不注册该工具） |
 | persona | ✅ | 只作用于该子代理，遮蔽部署 persona |
 | 工具过滤 | ✅ | `[tools] allow/deny`：从子代理提示词移除 **且** 拒绝执行 |
 | 深度上限 | ✅ | `max_depth`（绝对值，最小 1） |
@@ -132,7 +132,7 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 5. 解析深度：定义 `max_depth` 优先，否则读 Host 设置。
 6. 检查取消信号 → 分派：
    - `one-shot`：`ctx.subagents.start(provider, request)` → 等 `result` → **总是 dispose**；
-   - `continuable`：`ctx.subagents.startContinuable({provider, label, request, signal})` → 返回 `started subagent <childId>`。该 Promise 在**入队被接受**时就 resolve（不等待子代理开跑或落盘），措辞与官方 `subagent` 工具在 continuable 下逐字一致。交付层**没有隐式回传**（官方：`The base lifecycle has no implicit report behavior`，可选 report 包未随本发行提供）：产出靠 `send_message` 消息往返，续聊（steer / wake / 冷启动）属于官方 `dsh-tool-subagent-control`，本插件不重复实现。
+   - `continuable`：`ctx.subagents.startContinuable({provider, label, request, signal})` → 返回 `started subagent <childId>`。该 Promise 在**入队被接受**时就 resolve（不等待子代理开跑或落盘），措辞与官方 `subagent` 工具在 continuable 下逐字一致 —— **结论不在本次返回值里**。子代理结算时由 `dsh-subagent` 的续接管理器 `notifySettlement()` 向父会话投递一条 user 消息：开头是结局句（`Background subagent <id> finished and will do no further work unless you send it more.`，另有 stopped / ran out of room / declined / failed 四种），随后是子代理**最终 assistant 输出中的非空文本块**（无非空文本时写 `It left no closing message.`）；该投递是**无条件**的（只要调用方拿到过 id），父会话空闲会被唤醒，且**不受 Agent Teams 影响**。不回传的是中间过程（工具输出、推理、中途文本），那些靠 `send_message` 往返；续聊（steer / wake / 冷启动）属于官方 `dsh-tool-subagent-control`，本插件不重复实现。
 7. 结果映射：`completed` → 返回子代理最终文本（无文本时给占位句）；非 `completed` → 工具报错，内容是 `the subagent did not complete: <stopReason>` + 提供方诊断 + 部分输出。
 
 委派不修改父会话，因此声明为并发安全（`isConcurrencySafe: () => true`）。

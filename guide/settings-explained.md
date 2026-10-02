@@ -94,4 +94,18 @@
 - 安装与开启步骤：[`README.md`](../README.md)
 - 技术文档（机制、校验规则、能力位、限制）：[`technical.md`](technical.md)
 - 定义文件字段参考：[`README.md` · TOML 字段参考](../README.md#toml-字段参考)
+- `persona` 怎么写、`continuable` 的结论怎么回传：[`README.md` · 写 persona 时的要求](../README.md#写-persona-时的要求决定父会话能拿到什么)
 - 逐键注释的完整示例：[`explorer.toml`](explorer.toml)、[`reviewer.toml`](reviewer.toml)
+
+## 附：让 AI 代写定义时的对照表
+
+内置 Skill 会按这张表提问与校验；你自己写或让别人写时，也按它自查：
+
+| 症状 | 原因 | 怎么改 |
+|---|---|---|
+| 子代理"跑完了但父会话什么也没拿到" | `continuable` 只回传**收尾消息的文本**，而 `persona` 没要求把结论写进收尾 | 在 `persona` 里明确「收尾消息给结论 + 证据 + 未解决问题」 |
+| 中途发现没传回父会话 | 中途的工具输出与思考**不在**结算通知里 | 需要提前通知时，要求它 `send_message(agent_id = 父代理 id)`（该 id 由宿主注入子代理任务提示） |
+| 定义在列表里消失 | 该文件解析失败（未知键、`max_depth = 0`、`[tools]` 写了不存在的名字等） | 看工具描述里的 `Unavailable definitions:` 或 Host 日志；其余定义不受影响 |
+| 定义在项目里不生效 | 项目级定义需要打开**信任项目级定义** | 打开该开关，下一次委派生效（无需重启） |
+| 想让子代理报结构化结果却报错 | `output_schema` 只能配 `one-shot` | 改成 `one-shot`，或去掉 `output_schema` |
+| 委派报"不支持的能力" | provider 能力位不匹配（如 `acp` 不支持 `persona`/`model`） | 换 `spawn`/`fork`，或去掉该字段 |
