@@ -25,6 +25,18 @@ dsh plugin --profile web add @heluojiang/dsh-agents-toml
 
 > 包已发布到 npm（scoped 包 `publishConfig.access: public`，因此公开可装）。从 npm 装到的是**构建产物**（`lib/`、`assets/skill/`、`cordis.patch.yml`、文档）；`prepare` 在发布时已构建宿主与客户端两个面。
 
+**npm 安装注意两件事：**
+
+1. **刚发布的版本可能被 pnpm 延迟采用。** pnpm 11 的"最小发布年龄"策略（`minimumReleaseAge`）默认不采用太新的版本；`dsh plugin add` 会把该包自动加入 `minimumReleaseAgeExclude` 并提示一行，正常继续即可。手动用 pnpm 装而卡住时，把该包加进同一个排除列表。
+2. **判断"是否发布成功"要看注册表，不要看网页。** npmjs.com 对不存在的包也会渲染一个页面，容易误判；权威判据是：
+
+   ```sh
+   npm view @heluojiang/dsh-agents-toml version      # 成功时输出 0.2.1
+   curl -s -o /dev/null -w '%{http_code}\n' https://registry.npmjs.org/@heluojiang%2Fdsh-agents-toml   # 成功时 200
+   ```
+
+   另外 npm **不允许覆盖已发布版本**：改动后必须升版本（`npm version patch`）再 `npm publish`；直接重发同一版本会报 `You cannot publish over the previously published versions` —— 那说明该版本**早已发布成功**，不是失败。
+
 安装后，**web profile 会自动加载本插件的客户端半边**（`dsh.client` 清单 + `./client` 导出，产物 `lib/client.js`），无需额外步骤；`headless` / `sdk` / `acp` 等没有 GUI 的 profile 会忽略它。
 
 ### GitHub
