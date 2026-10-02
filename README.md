@@ -103,8 +103,9 @@ dsh web --patch ./dev.patch.yml
 **自查与关闭**：
 
 - 会话工具列表里出现 `spawn_teammate`，即团队已启用；
-- 关闭：插件页「官方」栏关掉「智能体团队」（等价于把它从 profile 的 `dsh.profile.bundles` 移除），或 `dsh plugin --profile <profile> remove @deepseek-ai/dsh-experimental-agent-team-profile`；
-- 本插件的**设置页会自动检测**：一旦发现团队已启用，就在配置区顶部显示红色提示，可关闭（关掉再开启团队会重新提示）。
+- **关闭团队**：插件页「官方」栏关掉「智能体团队」的开关（等价于把它从 profile 的 `dsh.profile.bundles` 移除），或 `dsh plugin --profile <profile> remove @deepseek-ai/dsh-experimental-agent-team-profile`；
+- 本插件的**设置页会自动检测**：一旦发现团队已启用，就在配置区顶部显示红色提示，建议你去关掉团队。**这个提示框本身可以关闭**（右上角 `×`）：关掉后不再显示，浏览器里记住该选择，等团队真的关闭后再启用时会重新提示。
+- **提示只做提醒：本插件不会替你关闭团队**，也不会改动你的 profile —— 关闭动作始终由你在插件页执行（上一条）。
 
 ## 插件设置项
 
@@ -309,7 +310,7 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 只有官方 `dsh-tool-subagent-control` 的那个可以：参数是 **`agent_id`**，只授权**直接父子**之间，返回的是**送达确认**而不是答复。Agent Teams 的同名工具参数是 **`target`**、寻址的是**队友**：拿子代理 id 去调只会得到 `active teammate "<id>" not found`。
 
 **误解 3：装了 Agent Teams 就不能用本插件了。**
-本插件的 `agent_type` 委派直接调用 `ctx.subagents.start()` / `startContinuable()`，与官方 `tool-subagent*` 无关，所以**委派本身照常可用**。但官方**不支持**这个组合使用方式：被 Agent Teams 替换掉的正是"官方直连委派"那一路 —— 父代理续聊 continuable 子代理的控制工具、`list_agents`（变成列队友）、以及官方 `subagent` / `subagent_fork` 工具本身。因此本插件**不推荐**、也不支持与它同时启用；设置页检测到团队开启时会显示红色提示，完整说明见[与智能体团队（Agent Teams）不支持组合使用](#与智能体团队agent-teams不支持组合使用)。
+本插件的 `agent_type` 委派直接调用 `ctx.subagents.start()` / `startContinuable()`，与官方 `tool-subagent*` 无关，所以**委派本身照常可用**。但官方**不支持**这个组合使用方式：被 Agent Teams 替换掉的正是"官方直连委派"那一路 —— 父代理续聊 continuable 子代理的控制工具、`list_agents`（变成列队友）、以及官方 `subagent` / `subagent_fork` 工具本身。因此本插件**不推荐**、也不支持与它同时启用；设置页检测到团队开启时会显示红色提示（提示框自身可关闭；**关闭团队仍需你自己在插件页操作，本插件不会代为改动 profile**），完整说明见[与智能体团队（Agent Teams）不支持组合使用](#与智能体团队agent-teams不支持组合使用)。
 
 ### `max_depth` 的语义
 

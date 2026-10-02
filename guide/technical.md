@@ -336,9 +336,12 @@ plugin.enabled && moduleName ∈ { '@deepseek-ai/dsh-experimental-agent-team', '
 1. 网关把每个命名空间装成**独立服务** `remote.<namespace>`（`remoteServiceKey`），所以 `inject` 必须写成 `['slots','locale','configForms','remote','remote.pluginManager']`——只注入基服务 `remote` 时 `ctx.remote.pluginManager` 是 `undefined`，提示会静默消失。
 2. 网关以 `RemoteResult<T>` 作答：`{ ok: true, value }` 或 `{ ok: false, error }`（`@deepseek-ai/dsh-typert-protocol`）。**必须拆信封**：直接当数组用会抛 `bundles.some is not a function`，而且抛在异步链上会变成未处理的 rejection（本次实测即如此）。
 
-**失败语义**：任一读取失败、返回 `ok:false` 或答非所问时，保持上一次状态——不误报冲突，也不误清"已关闭"标记；只有**观察到 bundles 且无冲突**才重置关闭标记（"关掉再开启"因此会重新提示）。整个读取包在 try 内，任何异常都不会冒泡成未处理 rejection。
+**关闭语义**：这里有两个不同的"关闭"，不要混淆：
 
-**关闭语义**：关闭状态保存在浏览器 `localStorage`（键 `dsh-agents-toml.agent-team-warning.v1`，与本仓库客户端既有做法一致），不写入 profile 配置；存储不可用时关闭只对本次访问生效。
+- **关闭提示框**（本插件实现）：点提示右上角 `×`，状态存进浏览器 `localStorage`（键 `dsh-agents-toml.agent-team-warning.v1`，与本仓库客户端既有做法一致），不写入 profile 配置；存储不可用时只对本次访问生效。
+- **关闭智能体团队**（用户自行操作）：提示只是提醒，本插件**不调用** `pluginManager/setBundleEnabled`，也不会改写 profile——关闭动作始终发生在插件页「官方」栏或 `dsh plugin remove`。
+
+**失败语义**：任一读取失败、返回 `ok:false` 或答非所问时，保持上一次状态——不误报冲突，也不误清"已忽略"标记；只有**观察到 bundles 且无冲突**才重置该标记（"关掉团队再开启"因此会重新提示）。整个读取包在 try 内，任何异常都不会冒泡成未处理 rejection。
 
 **订阅**：`ctx.remote.$on('plugin-manager/changed', refresh)`——开关一改就重读；事件缺失时退化为"打开页面检测一次"。
 

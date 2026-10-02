@@ -100,7 +100,8 @@ interface CardProps extends SettingsFormActions, TeamWarningFace {
   useTeamWarning: <S>(selector: (snapshot: TeamWarningState) => S) => S
 }
 
-/** Copy key of this plugin's dictionary. */type LocaleKey =
+/** Copy key of this plugin's dictionary. */
+type LocaleKey =
   | 'description'
   | 'trustLabel' | 'trustHelp'
   | 'toolNameLabel' | 'toolNameHelp'
