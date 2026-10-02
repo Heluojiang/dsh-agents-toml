@@ -96,14 +96,31 @@ interface Observed {
   slotInjections: string[]
   served: string[][]
   registrations: { entry: Record<string, unknown>; component: (props: never) => unknown }[]
+  /** Events the artifact subscribed to on the gateway service. */
+  remoteEvents: string[]
 }
+
+/** Fixtures for the plugin-manager reads the card performs. */
+interface TeamFixtures {
+  /** Bundles the stubbed Host reports. */
+  readonly bundles?: readonly { name: string; enabled: boolean }[]
+  /** Plugin rows the stubbed Host reports. */
+  readonly plugins?: readonly { moduleName: string; enabled: boolean }[]
+  /** Answer both reads with a gateway failure instead of a value. */
+  readonly failReads?: boolean
+}
+
+/** Bundles that mean Agent Teams is on, and its off state. */
+const TEAM_ON: TeamFixtures = { bundles: [{ name: '@deepseek-ai/dsh-experimental-agent-team-profile', enabled: true }] }
+const TEAM_OFF: TeamFixtures = { bundles: [{ name: '@deepseek-ai/dsh-experimental-agent-team-profile', enabled: false }] }
 
 /**
  * Evaluate the artifact exactly as the shell does: one loader call, whose
  * factory receives the shared module table as `require`.
+ * @param fixtures - plugin-manager answers the card's warning reads.
  * @returns What the stubbed shell observed, plus the plugin's module exports.
  */
-function loadArtifact(): Observed {
+async function loadArtifact(fixtures: TeamFixtures = TEAM_OFF): Promise<Observed> {
   assert.ok(artifact !== undefined, 'client artifact is absent')
   const observed: Observed = {
     module: {},
@@ -121,12 +138,19 @@ function loadArtifact(): Observed {
     slotInjections: [],
     served: [],
     registrations: [],
+    remoteEvents: [],
   }
   const moduleTable: Record<string, unknown> = {
     'react': { useId: () => 'id-1' },
     'react/jsx-runtime': {
       jsx: (type: unknown, props: Record<string, unknown>): Element => ({ type, props }),
       jsxs: (type: unknown, props: Record<string, unknown>): Element => ({ type, props }),
+    },
+    '@deepseek-ai/dsh-client-store': {
+      createSnapshotStore: <T>(init: T): { getSnapshot: () => T; set: (next: T) => void } => {
+        let current = init
+        return { getSnapshot: () => current, set: (next: T) => { current = next } }
+      },
     },
     '@deepseek-ai/dsh-client-ui-primitives': {
       SettingsFormModel: RecordingFormModel,
@@ -182,10 +206,27 @@ function loadArtifact(): Observed {
         return () => {}
       },
     },
+    remote: {
+      // The gateway answers with a `RemoteResult` envelope, not a bare array.
+      pluginManager: {
+        listBundles: async () => fixtures.failReads === true
+          ? { ok: false as const, error: { code: 'unavailable', message: 'no host' } }
+          : { ok: true as const, value: fixtures.bundles ?? [] },
+        listPlugins: async () => fixtures.failReads === true
+          ? { ok: false as const, error: { code: 'unavailable', message: 'no host' } }
+          : { ok: true as const, value: fixtures.plugins ?? [] },
+      },
+      $on: (event: string, _listener: () => void) => {
+        observed.remoteEvents.push(event)
+        return () => {}
+      },
+    },
   }
   const run = new Function('window', artifact as string) as (window: unknown) => void
   run(windowStub)
   ;(observed.module.apply as (ctx: unknown) => void)(ctx)
+  // The warning read is asynchronous; let the artifact publish its answer.
+  await new Promise(resolve => setTimeout(resolve, 0))
   return observed
 }
 
@@ -209,6 +250,98 @@ function collect(node: unknown, type: unknown): Element[] {
   return collect(element.props?.['children'], type)
 }
 
+/**
+ * Collect every element a predicate accepts, descending through function
+ * components and matched elements alike. `collect` stops at the first element
+ * of a requested type, which cannot reach a node nested inside a `div`.
+ * @param node - element, array, or scalar child.
+ * @param match - predicate over one element.
+ * @returns the matching elements, outermost first.
+ */
+function collectWhere(node: unknown, match: (element: Element) => boolean): Element[] {
+  if (Array.isArray(node)) return node.flatMap(child => collectWhere(child, match))
+  if (typeof node !== 'object' || node === null) return []
+  const element = node as Element
+  if (typeof element.type === 'function') {
+    return collectWhere((element.type as (props: Record<string, unknown>) => unknown)(element.props), match)
+  }
+  const found = match(element) ? [element] : []
+  return [...found, ...collectWhere(element.props?.['children'], match)]
+}
+
+/** Props a real renderer derives for the card, bound to one loaded artifact. */
+function cardProps(observed: Observed, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const registration = observed.registrations[0]
+  assert.ok(registration !== undefined, 'the card registered no slot entry')
+  const face = (registration.entry['inject'] as () => {
+    hooks: {
+      card: { getSnapshot: () => unknown }
+      teamWarning: { getSnapshot: () => unknown }
+    }
+    edit: (field: string, text: string) => void
+    resetField: (field: string) => void
+    save: () => void
+    discard: () => void
+    dismissTeamWarning: () => void
+  })()
+  return {
+    t: (key: string) => key,
+    useCard: (selector: (snapshot: unknown) => unknown) => selector(face.hooks.card.getSnapshot()),
+    useTeamWarning: (selector: (snapshot: unknown) => unknown) => selector(face.hooks.teamWarning.getSnapshot()),
+    ...face,
+    ...overrides,
+  }
+}
+
+/**
+ * Render the card the way the slot renderer would.
+ * @param observed - one loaded artifact.
+ * @param overrides - props replacing the derived ones (e.g. `view`).
+ * @returns the rendered tree.
+ */
+function renderCard(observed: Observed, overrides: Record<string, unknown> = {}): unknown {
+  const registration = observed.registrations[0]
+  assert.ok(registration !== undefined)
+  return (registration.component as unknown as (props: Record<string, unknown>) => unknown)(cardProps(observed, overrides))
+}
+
+/**
+ * Count the Agent Teams warnings in one rendered tree.
+ * @param rendered - the tree.
+ * @returns how many alert strips the card rendered.
+ */
+function alertCount(rendered: unknown): number {
+  return collectWhere(rendered, element => element.props['role'] === 'alert').length
+}
+
+/** Browser storage a test installs so the dismissal can persist. */
+interface StubStorage {
+  readonly items: Map<string, string>
+}
+
+/**
+ * Install a `localStorage` the artifact can read and write.
+ * @returns the storage handle to inspect.
+ */
+function installStorage(): StubStorage {
+  const items = new Map<string, string>()
+  const stub = {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => { items.set(key, value) },
+    removeItem: (key: string) => { items.delete(key) },
+  }
+  ;(globalThis as { localStorage?: unknown }).localStorage = stub
+  return { items }
+}
+
+/** Remove the installed storage, restoring the no-storage path. */
+function removeStorage(): void {
+  delete (globalThis as { localStorage?: unknown }).localStorage
+}
+
+/** Key the artifact persists a closed warning under. */
+const WARNING_KEY = 'dsh-agents-toml.agent-team-warning.v1'
+
 test('the artifact registers one module through the loader handoff', { skip: artifact === undefined }, () => {
   assert.ok(artifact !== undefined)
   assert.match(artifact, new RegExp(`window\\.__ModuleLoader__\\.load\\(\\{ id: ${JSON.stringify(PACKAGE_NAME)}, factory: \\(require\\) => \\{`))
@@ -226,10 +359,10 @@ test('the served bundle addresses exactly one slot, keyed by its bundle', { skip
   assert.doesNotMatch(artifact, /plugins\.detail\./)
 })
 
-test('the module exports the plugin protocol the shell loads', { skip: artifact === undefined }, () => {
-  const observed = loadArtifact()
+test('the module exports the plugin protocol the shell loads', { skip: artifact === undefined }, async () => {
+  const observed = await loadArtifact()
   assert.equal(observed.handoffId, PACKAGE_NAME)
-  assert.deepEqual(observed.module.inject, ['slots', 'locale', 'configForms'])
+  assert.deepEqual(observed.module.inject, ['slots', 'locale', 'configForms', 'remote', 'remote.pluginManager'])
   assert.equal(observed.module.NS, NS)
   assert.equal(observed.module.ENTRY_ID, ENTRY_ID)
   // The manifest name is the module-table id: a rename that misses here would
@@ -248,11 +381,14 @@ test('the manifest name is the row name, the loader id, and the config key', { s
   assert.match(artifact, new RegExp(`window\\.__ModuleLoader__\\.load\\(\\{ id: ${JSON.stringify(PACKAGE_NAME)}, factory:`))
 })
 
-test('apply registers dictionaries, the served form, and one bundle-page section', { skip: artifact === undefined }, () => {
-  const observed = loadArtifact()
+test('apply registers dictionaries, the served form, and one bundle-page section', { skip: artifact === undefined }, async () => {
+  const observed = await loadArtifact()
   const dictionary = observed.dictionaries[NS]
   assert.ok(dictionary !== undefined, 'the plugin registered no dictionary for its namespace')
-  for (const key of ['description', 'trustLabel', 'trustHelp', 'save']) {
+  for (const key of [
+    'description', 'trustLabel', 'trustHelp', 'save',
+    'teamWarningTitle', 'teamWarningBody', 'teamWarningDismiss',
+  ]) {
     assert.ok(dictionary.zh[key] !== undefined && dictionary.en[key] !== undefined, `dictionary is missing ${key}`)
   }
   assert.deepEqual(observed.served, [[ENTRY_ID]])
@@ -265,10 +401,12 @@ test('apply registers dictionaries, the served form, and one bundle-page section
   assert.equal(entry?.['key'], BUNDLE_NAME)
   assert.equal(entry?.['id'], undefined)
   assert.equal(entry?.['locale'], NS)
+  // The warning re-reads the inventory when the Plugins page changes a switch.
+  assert.deepEqual(observed.remoteEvents, ['plugin-manager/changed'])
 })
 
-test('the card stages the four served fields as typed writes', { skip: artifact === undefined }, () => {
-  const observed = loadArtifact()
+test('the card stages the four served fields as typed writes', { skip: artifact === undefined }, async () => {
+  const observed = await loadArtifact()
   const model = RecordingFormModel.latest
   assert.ok(model !== undefined, 'the card built no form model')
   assert.deepEqual(model.specs.map(spec => spec.field), FIELDS)
@@ -286,32 +424,16 @@ test('the card stages the four served fields as typed writes', { skip: artifact 
   assert.deepEqual(toolName.parse(' reviewer '), { kind: 'set', value: 'reviewer' })
   assert.deepEqual(toolName.parse('  '), { kind: 'clear' })
 
-  const face = observed.registrations[0]?.entry['inject'] as () => {
+  const face = cardProps(observed) as {
     hooks: { card: { getSnapshot: () => Record<string, { text: string }> } }
-    edit: (field: string, text: string) => void
-    save: () => void
   }
-  const bound = face()
-  assert.equal(bound.hooks.card.getSnapshot()['trustProjectAgents']?.text, 'true')
-  assert.equal(bound.hooks.card.getSnapshot()['reportFailuresToModel']?.text, 'false')
+  assert.equal(face.hooks.card.getSnapshot()['trustProjectAgents']?.text, 'true')
+  assert.equal(face.hooks.card.getSnapshot()['reportFailuresToModel']?.text, 'false')
 })
 
-test('the rendered card reflects the served values and stages switch edits', { skip: artifact === undefined }, () => {
-  const observed = loadArtifact()
-  const registration = observed.registrations[0]
-  assert.ok(registration !== undefined)
-  const face = (registration.entry['inject'] as () => {
-    hooks: { card: { getSnapshot: () => unknown } }
-    edit: (field: string, text: string) => void
-  })()
-  const rendered = (registration.component as unknown as (props: Record<string, unknown>) => unknown)({
-    t: (key: string) => key,
-    useCard: (selector: (snapshot: unknown) => unknown) => selector(face.hooks.card.getSnapshot()),
-    edit: face.edit,
-    resetField: () => {},
-    save: () => {},
-    discard: () => {},
-  })
+test('the rendered card reflects the served values and stages switch edits', { skip: artifact === undefined }, async () => {
+  const observed = await loadArtifact()
+  const rendered = renderCard(observed)
   const switches = collect(rendered, 'Switch')
   assert.equal(switches.length, 3, 'the card renders three switches')
   assert.equal(switches[0]?.props['checked'], true)
@@ -321,4 +443,93 @@ test('the rendered card reflects the served values and stages switch edits', { s
   const valueFields = collect(rendered, 'SettingsValueField')
   assert.equal(valueFields.length, 1)
   assert.equal(valueFields[0]?.props['text'], 'subagent_custom')
+})
+
+test('the card warns while Agent Teams is enabled and stops once closed', { skip: artifact === undefined }, async () => {
+  const observed = await loadArtifact(TEAM_ON)
+  const rendered = renderCard(observed)
+  assert.equal(alertCount(rendered), 1, 'an enabled Agent Teams bundle must raise one warning')
+  const alert = collectWhere(rendered, element => element.props['role'] === 'alert')[0]
+  assert.ok(alert !== undefined)
+  const text = JSON.stringify(alert)
+  assert.match(text, /teamWarningTitle/)
+  assert.match(text, /teamWarningBody/)
+
+  const close = collect(rendered, 'button')[0]
+  assert.ok(close !== undefined, 'the warning renders no close control')
+  assert.equal(close.props['aria-label'], 'teamWarningDismiss')
+  ;(close.props['onClick'] as () => void)()
+  assert.equal(alertCount(renderCard(observed)), 0, 'closing the warning hides it')
+})
+
+test('a team row or a third-party team pack is the same conflict', { skip: artifact === undefined }, async () => {
+  const byRow = await loadArtifact({
+    plugins: [{ moduleName: '@deepseek-ai/dsh-experimental-tool-agent-team', enabled: true }],
+  })
+  assert.equal(alertCount(renderCard(byRow)), 1)
+
+  const thirdParty = await loadArtifact({ bundles: [{ name: '@acme/agent-team-profile', enabled: true }] })
+  assert.equal(alertCount(renderCard(thirdParty)), 1)
+
+  const disabledRow = await loadArtifact({
+    plugins: [{ moduleName: '@deepseek-ai/dsh-experimental-tool-agent-team', enabled: false }],
+  })
+  assert.equal(alertCount(renderCard(disabledRow)), 0)
+})
+
+test('Agent Teams off leaves the card silent and intact', { skip: artifact === undefined }, async () => {
+  const observed = await loadArtifact(TEAM_OFF)
+  const rendered = renderCard(observed)
+  assert.equal(alertCount(rendered), 0)
+  assert.equal(collect(rendered, 'Switch').length, 3)
+  assert.equal(collect(rendered, 'SettingsValueField').length, 1)
+})
+
+test('the list summary stays one line and carries no warning', { skip: artifact === undefined }, async () => {
+  const observed = await loadArtifact(TEAM_ON)
+  assert.equal(alertCount(renderCard(observed, { view: 'summary' })), 0)
+})
+
+test('closing persists, and turning Agent Teams off re-arms the warning', { skip: artifact === undefined }, async () => {
+  const storage = installStorage()
+  try {
+    const first = await loadArtifact(TEAM_ON)
+    const close = collect(renderCard(first), 'button')[0]
+    assert.ok(close !== undefined)
+    ;(close.props['onClick'] as () => void)()
+    assert.equal(storage.items.get(WARNING_KEY), '1')
+
+    // A later visit in the same browser stays quiet.
+    assert.equal(alertCount(renderCard(await loadArtifact(TEAM_ON))), 0)
+
+    // Turning Agent Teams off clears the choice, so enabling it again warns.
+    assert.equal(alertCount(renderCard(await loadArtifact(TEAM_OFF))), 0)
+    assert.equal(storage.items.has(WARNING_KEY), false)
+    assert.equal(alertCount(renderCard(await loadArtifact(TEAM_ON))), 1)
+  } finally {
+    removeStorage()
+  }
+})
+
+test('the warning works without browser storage and survives a failed read', { skip: artifact === undefined }, async () => {
+  // No storage is installed here: closing still hides the strip for this visit.
+  const observed = await loadArtifact(TEAM_ON)
+  const close = collect(renderCard(observed), 'button')[0]
+  assert.ok(close !== undefined)
+  ;(close.props['onClick'] as () => void)()
+  assert.equal(alertCount(renderCard(observed)), 0)
+})
+
+test('a failed gateway read raises no warning and no unhandled rejection', { skip: artifact === undefined }, async () => {
+  const rejections: unknown[] = []
+  const onRejection = (reason: unknown): void => { rejections.push(reason) }
+  process.on('unhandledRejection', onRejection)
+  try {
+    const observed = await loadArtifact({ ...TEAM_ON, failReads: true })
+    assert.equal(alertCount(renderCard(observed)), 0)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.deepEqual(rejections, [], 'an unreadable inventory must stay inside the plugin')
+  } finally {
+    process.off('unhandledRejection', onRejection)
+  }
 })

@@ -54,6 +54,14 @@ declare module '@deepseek-ai/dsh-client-store' {
      */
     subscribe(listener: () => void): () => void
   }
+
+  /**
+   * Create one bare observable the renderer can bind through an inject `hooks`
+   * compartment member.
+   * @param init - the initial snapshot.
+   * @returns the store.
+   */
+  export function createSnapshotStore<T>(init: T): SnapshotStore<T>
 }
 
 declare module '@deepseek-ai/dsh-client-ui-primitives' {

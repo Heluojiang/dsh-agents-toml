@@ -292,7 +292,6 @@ dsh --profile plugin-dev --port 3099 --no-open     # 控制台会打印带 token
 验证要点：`--dump-config` 里出现插件行与 `config`；启动后新任务里能看到该工具与 `agent_type` 列表；真机委派后检查会话日志（`sessions/.../session.v4.jsonl.zstd`，多帧 zstd）里的 `tool/call`、`subagent/catalog` 与子会话文件。设置项的写入可以直接观察 profile 的 `cordis.patch.yml` 是否被更新。
 
 ## 17. 内置 Skill
-
 包内 `assets/skill/SKILL.md` 是**模型可见**的定义撰写指南（英文，与工具描述一致），让用户在装完插件后用自然语言就能得到一份合法定义。
 
 **注册方式**（`src/skill.ts` + `src/index.ts` 的 `contributeSkill`）：提供方实现 `ctx.skills.registerProvider((control) => provider)`，候选形状为
@@ -311,3 +310,36 @@ dsh --profile plugin-dev --port 3099 --no-open     # 控制台会打印带 token
 **降级策略**：资产缺失或 frontmatter 不合法时记一条 `error` 日志并**不注册**技能，插件其余功能照常。资产里的 `name` 若与注册名不一致也按失败处理，避免"目录里显示的名字"与"文件自称的名字"漂移。
 
 **发现与刷新**：`tool-skill` 把技能目录作为持久会话目录注入（`<available_skills>` 块），并订阅 `skills/change`——因此注册发生在**运行中的会话**里也会推送一份替换目录，无需重启会话。
+
+## 18. 与 Agent Teams 的互斥关系（检测实现）
+
+用户文档只保留结论与后果（README 的「与智能体团队不支持组合使用」），这里记录实现。
+
+**为什么是客户端检测**：要提示的是"用户在插件页看到的那个开关"，权威数据源就是插件页自己读的那份清单，因此客户端半边直接用**同一个远程命名空间**：
+
+```text
+ctx.remote.pluginManager.listBundles()   // 网关应答 RemoteResult<BundleInfo[]>
+ctx.remote.pluginManager.listPlugins()   // BundleInfo{ name, enabled, rows[{rowId,moduleName}], overrides[] }
+```
+
+判定式（任一成立即视为团队在运行）：
+
+```text
+bundle.enabled && (name === '@deepseek-ai/dsh-experimental-agent-team-profile' || /(^|[/@-])agent-team(-profile)?$/u.test(name))
+plugin.enabled && moduleName ∈ { '@deepseek-ai/dsh-experimental-agent-team', '@deepseek-ai/dsh-experimental-tool-agent-team' }
+```
+
+第二条覆盖"没装组合包但把团队行挂进 profile"的情形；名称正则覆盖第三方同名组合包——它们造成的冲突与官方一致，报出来才是对的。**host 半边不做任何检测**：多一条真相源只会让"提示"与"实际组合"漂移。
+
+**注入与取数**（两处实测踩点）：
+
+1. 网关把每个命名空间装成**独立服务** `remote.<namespace>`（`remoteServiceKey`），所以 `inject` 必须写成 `['slots','locale','configForms','remote','remote.pluginManager']`——只注入基服务 `remote` 时 `ctx.remote.pluginManager` 是 `undefined`，提示会静默消失。
+2. 网关以 `RemoteResult<T>` 作答：`{ ok: true, value }` 或 `{ ok: false, error }`（`@deepseek-ai/dsh-typert-protocol`）。**必须拆信封**：直接当数组用会抛 `bundles.some is not a function`，而且抛在异步链上会变成未处理的 rejection（本次实测即如此）。
+
+**失败语义**：任一读取失败、返回 `ok:false` 或答非所问时，保持上一次状态——不误报冲突，也不误清"已关闭"标记；只有**观察到 bundles 且无冲突**才重置关闭标记（"关掉再开启"因此会重新提示）。整个读取包在 try 内，任何异常都不会冒泡成未处理 rejection。
+
+**关闭语义**：关闭状态保存在浏览器 `localStorage`（键 `dsh-agents-toml.agent-team-warning.v1`，与本仓库客户端既有做法一致），不写入 profile 配置；存储不可用时关闭只对本次访问生效。
+
+**订阅**：`ctx.remote.$on('plugin-manager/changed', refresh)`——开关一改就重读；事件缺失时退化为"打开页面检测一次"。
+
+**已知限制**：本插件行被禁用时没有卡片，也就没有提示——README 是持久警示渠道；换浏览器会重新提示一次。

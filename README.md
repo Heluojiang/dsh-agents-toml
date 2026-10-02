@@ -7,7 +7,7 @@
 - **失败互不牵连**：某个定义写错或用了当前 provider 不支持的能力时，只有该定义不可用（日志 + 工具描述说明原因），其余照常，且**绝不会导致 Agent 创建失败**。
 - **热生效**：定义文件在每次委派时重新读取；目录 watcher 让模型看到的 `agent_type` 列表同步刷新。
 
-**文档导航**：[安装](#安装) · [插件设置项](#插件设置项) · [用自然语言创建定义](#用自然语言创建定义内置-skill) · [插件行配置](#插件行配置通常无需手改) · [TOML 字段参考](#toml-字段参考) · [常见误解](#常见误解) · [示例定义](guide/explorer.toml) · [技术文档](guide/technical.md) · [开关场景讲解](guide/settings-explained.md)
+**文档导航**：[安装](#安装) · [不支持与智能体团队组合](#与智能体团队agent-teams不支持组合使用) · [插件设置项](#插件设置项) · [用自然语言创建定义](#用自然语言创建定义内置-skill) · [插件行配置](#插件行配置通常无需手改) · [TOML 字段参考](#toml-字段参考) · [常见误解](#常见误解) · [示例定义](guide/explorer.toml) · [技术文档](guide/technical.md) · [开关场景讲解](guide/settings-explained.md)
 
 ## 安装
 
@@ -81,6 +81,27 @@ dsh web --patch ./dev.patch.yml
 | 在**插件设置项**里改配置 | 不需要重启：volatile 引用原地更新，下一次委派即生效（仅 `agent_type` 列表要等下一次安装） | 不适用（无 GUI） |
 | 手改 `cordis.patch.yml` | 不需要重启（补丁文件被监听，该行重载） | 需要重启 |
 | 升级本插件版本（含客户端半边） | Host 模块不热替换，建议重启；刷新浏览器会重新拉取 `lib/client.js` | 需要重启 |
+
+## 与智能体团队（Agent Teams）不支持组合使用
+
+**本插件按"具名子代理"设计，与官方的「智能体团队」组合包不支持组合使用。请先在「插件 → 官方 → 智能体团队」把它关掉，再使用本插件。**
+
+官方对该组合包的说明就是它的设计意图：*Ordinary subagent delegation and overlapping global child controls are disabled*（`@deepseek-ai/dsh-experimental-agent-team-profile` 的 README）。其 `cordis.patch.yml` 会禁用四行——`tool-subagent-control`、`tool-subagent-list-agents`、`tool-subagent`、`tool-subagent-fork`——并改挂 `tool-agent-team`。于是：
+
+| 影响 | 具体表现 |
+|---|---|
+| **continuable 子代理无法追问、也取不回产出** | 续聊只能靠官方 `dsh-tool-subagent-control` 的 `send_message(agent_id)`；它被禁用后，子代理跑完既不通知父代理、也没有工具去问它（而本插件本身没有隐式回传） |
+| **同名工具不同含义** | 团队工具的 `send_message` 参数是 `target`（队友）、`list_agents` 列的是队友；拿子代理 id 去调只会得到 `active teammate "<id>" not found`，模型与人都容易误用 |
+| **官方委派工具消失** | 官方 `subagent` / `subagent_fork`（标准预设里默认 `backgroundMode: continuable`）被换成队友工具 —— 这不是本插件的工具，但会改变模型的默认选择 |
+| **模型可能不再选你的定义** | 两套工具同处一个作用域，多智能体任务上模型可能优先用团队工具 |
+
+**仍然照常工作**：`agent_type` 委派、TOML 解析与全部校验、能力位判定、`max_depth`、`[tools]`、`output_schema`、设置页四个开关、内置 Skill、定义热更新 —— 这些都不经过团队工具。
+
+**自查与关闭**：
+
+- 会话工具列表里出现 `spawn_teammate`，即团队已启用；
+- 关闭：插件页「官方」栏关掉「智能体团队」（等价于把它从 profile 的 `dsh.profile.bundles` 移除），或 `dsh plugin --profile <profile> remove @deepseek-ai/dsh-experimental-agent-team-profile`；
+- 本插件的**设置页会自动检测**：一旦发现团队已启用，就在配置区顶部显示红色提示，可关闭（关掉再开启团队会重新提示）。
 
 ## 插件设置项
 
@@ -285,7 +306,7 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 只有官方 `dsh-tool-subagent-control` 的那个可以：参数是 **`agent_id`**，只授权**直接父子**之间，返回的是**送达确认**而不是答复。Agent Teams 的同名工具参数是 **`target`**、寻址的是**队友**：拿子代理 id 去调只会得到 `active teammate "<id>" not found`。
 
 **误解 3：装了 Agent Teams 就不能用本插件了。**
-不是。本插件的 `agent_type` 委派直接调用 `ctx.subagents.start()` / `startContinuable()`，与官方 `tool-subagent*` 无关，因此与 Agent Teams 正常共存（实测同一会话里 `subagent_custom` 与团队工具同时可见）。被 Agent Teams 替换掉的只有官方直连委派那一路：父代理续聊 continuable 子代理的控制工具、`list_agents`（变成列队友）、以及官方 `subagent` / `subagent_fork` 工具本身。
+本插件的 `agent_type` 委派直接调用 `ctx.subagents.start()` / `startContinuable()`，与官方 `tool-subagent*` 无关，所以**委派本身照常可用**。但官方**不支持**这个组合使用方式：被 Agent Teams 替换掉的正是"官方直连委派"那一路 —— 父代理续聊 continuable 子代理的控制工具、`list_agents`（变成列队友）、以及官方 `subagent` / `subagent_fork` 工具本身。因此本插件**不推荐**、也不支持与它同时启用；设置页检测到团队开启时会显示红色提示，完整说明见[与智能体团队（Agent Teams）不支持组合使用](#与智能体团队agent-teams不支持组合使用)。
 
 ### `max_depth` 的语义
 
