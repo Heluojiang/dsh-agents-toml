@@ -27,7 +27,10 @@ dsh plugin --profile web add @heluojiang/dsh-agents-toml
 
 **npm 安装注意两件事：**
 
-1. **刚发布的版本可能被 pnpm 延迟采用。** pnpm 11 的"最小发布年龄"策略（`minimumReleaseAge`）默认不采用太新的版本；`dsh plugin add` 会把该包自动加入 `minimumReleaseAgeExclude` 并提示一行，正常继续即可。手动用 pnpm 装而卡住时，把该包加进同一个排除列表。
+1. **刚发布的版本不会被立刻装上 —— 要装最新版就显式写版本号。** pnpm 11 默认启用"最小发布年龄"（`minimumReleaseAge`）：`dsh plugin add @heluojiang/dsh-agents-toml` 会解析到**上一个够老的版本**（实测：0.2.2 发布约 20 分钟后，裸包名装到的仍是 0.2.1），并把解析到的那个版本追加进 profile 的 `pnpm-workspace.yaml` → `minimumReleaseAgeExclude`。因此：
+   - 立刻装最新版：**显式写版本**，例如 `dsh plugin --profile web add @heluojiang/dsh-agents-toml@0.2.2`；
+   - 或等过了发布年龄窗口再装（那时裸包名自然取到最新）；
+   - `minimumReleaseAgeExclude` 记的是"包@版本"，所以**每个新版本首次安装都要显式指定一次**。
 2. **判断"是否发布成功"要看注册表，不要看网页。** npmjs.com 对不存在的包也会渲染一个页面，容易误判；权威判据是：
 
    ```sh

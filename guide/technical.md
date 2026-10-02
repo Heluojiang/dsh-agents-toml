@@ -264,7 +264,7 @@ npm run test      # 只跑测试；pretest 会先重建 lib/client.js
 | 路径 | 行为 |
 |---|---|
 | `dsh plugin add <本地目录>` | 以 link 方式加入 profile；改代码后重启该进程即可生效 |
-| `dsh plugin add @heluojiang/dsh-agents-toml` | 走 npm 注册表，装的是已构建产物。pnpm 11 的 `minimumReleaseAge` 会延迟采用刚发布的版本，插件安装命令会自动把它加入 `minimumReleaseAgeExclude` 并打印一行说明 |
+| `dsh plugin add @heluojiang/dsh-agents-toml` | 走 npm 注册表，装的是已构建产物。pnpm 11 的 `minimumReleaseAge` 会让**裸包名解析到上一个够老的版本**（实测：新版本发布 20 分钟后装到的仍是上一版），并把解析到的 `包@版本` 追加进 `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude`；要装最新版须显式写 `@<版本>` |
 | `dsh plugin add github:<you>/dsh-agents-toml#<sha>` | 克隆源码后在包内执行 `prepare`（= `npm run build`），因此安装副本自带 `lib/`（含客户端半边） |
 
 pnpm ≥10 默认拦截依赖的构建脚本：第一次 `add` 会以 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` 失败，并打印放行所需的**完整 key**（被规范化成 codeload tarball URL 且带提交 SHA）。把它追加到 `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml` 的 `allowBuilds:` 下再重跑。只写裸包名不足以放行；SHA 随提交变化，更新提交后要补新 key。放行构建脚本等同于允许该包以你的权限执行代码，因此只放行自己信任的仓库并固定提交。
