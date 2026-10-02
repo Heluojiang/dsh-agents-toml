@@ -58,6 +58,9 @@ function bench(
     subagents: fake.service,
     load: () => Promise.resolve(discovery(definitions, options.failures ?? [])),
     installedNames: definitions.filter(entry => entry.enabled).map(entry => entry.name),
+    installedContinuable: definitions
+      .filter(entry => entry.enabled && entry.mode === 'continuable')
+      .map(entry => entry.name),
     installedFailures: options.failures ?? [],
   })
   return { tool, started: fake.started, continuable: fake.continuable, parent, exec: { agent: parent, signal: controller.signal } }
@@ -84,6 +87,15 @@ describe('tool schema', () => {
     ]
     const reporting = bench([definition()], { failures }).tool
     assert.match(reporting.description, /Unavailable definitions: writer \(child LLM routing is unsupported by this provider\)/)
+  })
+
+  it('warns that a continuable subagent answers later than this call', () => {
+    const oneShot = bench([definition()]).tool
+    assert.doesNotMatch(oneShot.description, /start in the background/)
+
+    const mixed = bench([definition(), definition({ name: 'explorer', mode: 'continuable' })]).tool
+    assert.match(mixed.description, /explorer instead start in the background and return only a child id/)
+    assert.match(mixed.description, /their answer arrives later, not with this call\./)
   })
 
   it('renders the canonical text value', () => {

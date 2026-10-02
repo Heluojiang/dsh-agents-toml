@@ -30,6 +30,8 @@ export interface DelegationToolOptions {
   readonly load: (agent: AgentLike) => Promise<DiscoveryResult>
   /** Names available when this instance was installed; drives the schema enum. */
   readonly installedNames: readonly string[]
+  /** Of those, the ones whose mode starts them in the background. */
+  readonly installedContinuable: readonly string[]
   /** Failures known when this instance was installed. */
   readonly installedFailures: readonly DefinitionFailure[]
 }
@@ -89,6 +91,15 @@ function buildDescription(options: DelegationToolOptions): string {
     'Delegate a self-contained task to one of the named subagents configured for this user or project, chosen with `agent_type`.',
     'The subagent works in its own context and returns only its result, so include everything it needs in `prompt`.',
   ]
+  if (options.installedContinuable.length > 0) {
+    // A background child answers through the parent's inbox, so the generic
+    // "returns only its result" above would promise an answer this call never
+    // carries.
+    parts.push(
+      `${options.installedContinuable.join(', ')} instead start in the background and return only a child id; `
+      + 'their answer arrives later, not with this call.',
+    )
+  }
   if (options.installedNames.length > 0) parts.push(`Configured subagents: ${options.installedNames.join(', ')}.`)
   if (options.reportFailuresToModel && options.installedFailures.length > 0) {
     const unavailable = options.installedFailures

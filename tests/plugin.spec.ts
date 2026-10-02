@@ -184,6 +184,9 @@ describe('createPlugin', () => {
     await created(b.fake)
     assert.equal(b.fake.tools.length, 1)
     assert.deepEqual(enumOf(b.fake.tools[0]!.definition), ['reviewer', 'explorer'])
+    // The continuable project definition overrode the one-shot user definition,
+    // so the installed description must carry the background-answer warning.
+    assert.match(b.fake.tools[0]!.definition.description, /reviewer instead start in the background/)
   })
 
   it('logs a broken definition without failing Agent creation or the other definitions', async () => {

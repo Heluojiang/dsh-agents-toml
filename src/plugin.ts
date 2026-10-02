@@ -164,6 +164,9 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
         subagents: scoped.subagents,
         load,
         installedNames: available.map(definition => definition.name),
+        installedContinuable: available
+          .filter(definition => definition.mode === 'continuable')
+          .map(definition => definition.name),
         installedFailures: discovery.failures,
       }))
     })

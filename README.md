@@ -228,7 +228,7 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 | `name` | **是** | string，`[A-Za-z0-9][A-Za-z0-9_-]{0,63}` | — | `agent_type` 的取值。**同一目录内重名 → 两个定义都失败**；跨目录同名时项目覆盖用户 |
 | `description` | **是** | 非空 string | — | 模型选择该子代理的依据 |
 | `enabled` | 否 | `true` / `false` | `true` | `false`：不进 `agent_type` 列表与工具描述；显式调用报 `subagent "x" is disabled in <file>` |
-| `mode` | 否 | `"one-shot"` / `"continuable"` | `"one-shot"` | `one-shot`：等待子代理完成并返回文本；`continuable`：立即返回 `started subagent <childId>`，可用 `send_message` 继续 |
+| `mode` | 否 | `"one-shot"` / `"continuable"` | `"one-shot"` | `one-shot`：等待子代理完成并返回文本；`continuable`：**立即**返回 `started subagent <childId>`（初始 prompt 已入队，子代理的答复稍后另行送达，**不是**这次工具调用的返回值）。续聊见 [继续一个 continuable 子代理](#继续一个-continuable-子代理依赖官方控制工具) |
 | `provider` | 否 | 已注册的传输名（随 profile 而定，如 `spawn`/`fork`/`acp`/`codex`/`claude-code`/`dsh-sdk`） | 插件行 `defaultProvider`（`spawn`） | 未注册时调用报错并列出已注册的 provider 名 |
 | `llm_provider` | 否 | string | 不覆盖（继承父级路由） | 子代理的 LLM 路由 provider；需要 `agentOptions` |
 | `model` | 否 | string | 同上 | 子代理使用的模型；需要 `agentOptions` |
@@ -257,6 +257,23 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 - **解析期失败（文件写错）**：必填缺失、类型错误、未知键、`max_depth = 0`、`[tools]` 出现非 `allow`/`deny` 的键 —— 定义直接判失败并给出原因。
 - **调用期失败（能力不匹配）**：provider 是否具备某项能力只有在委派那一刻才能确定，因此报错形如
   `subagent "x" cannot run on provider "codex": child LLM routing is unsupported by this provider`。
+
+### 继续一个 continuable 子代理（依赖官方控制工具）
+
+`mode = "continuable"` 是 **Harness 自带能力**（`ctx.subagents.startContinuable()`），本插件只把 TOML 字段映射过去，不自己实现续聊。于是有两条必须分清的事实：
+
+1. **工具返回值只是"已启动"**：`started subagent <childId>`（与官方 `subagent` 工具在 continuable 下的措辞逐字相同）。初始 prompt 在**入队被接受**时就返回，子代理的答复稍后经父会话 inbox 送达，不是这次调用的结果。
+2. **续聊要靠官方的 `dsh-tool-subagent-control`**，不是任意叫 `send_message` 的工具：
+
+| 工具 | 参数 | 语义 |
+|---|---|---|
+| `send_message` | `agent_id`、`message` | 只授权**直接父子**之间（父 → 直接 continuable 子，或驻留的 continuable 子 → 直接父）；返回 `{messageId}` = **送达确认，不是答复**。目标在跑就在最近步骤插入；空闲则唤醒；已结算则**冷启动**一个新 Activation 再投递 |
+| `interrupt_agent` | `agent_id` | 要求它停止当前工作（不等它停下）；之后仍可用 `send_message` 继续 |
+
+两条硬限制：
+
+- **`one-shot` 子代理永远无法续聊**；兄弟、隔代祖先、自身也都不被授权。
+- **启用 Agent Teams 后这条路会被它替换掉。** `dsh-experimental-agent-team-profile` 会禁用 `tool-subagent-control`（连同 `tool-subagent`、`tool-subagent-fork`、`list-agents`），改挂 `tool-agent-team`：那个 `send_message` 的参数是 **`target`**（队友），对子代理 id 只会报 `active teammate "<id>" not found`。此时 `agent_type` 委派本身照常可用，只是父代理无法再续聊该子代理 —— 这是该实验性 profile 的既定取舍，不是本插件的问题。
 
 ### `max_depth` 的语义
 

@@ -49,7 +49,7 @@ deny = ["write", "edit", "pwsh"]
 | `name` | yes | `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; kebab-case by convention |
 | `description` | yes | non-empty; the model's routing hint |
 | `enabled` | no | `false` hides it from the tool while keeping the file |
-| `mode` | no | `"one-shot"` (default) or `"continuable"` (returns a child id you continue with `send_message`) |
+| `mode` | no | `"one-shot"` (default) waits for the child and returns its text; `"continuable"` returns `started subagent <childId>` immediately and the child answers later through the parent's inbox (see the pitfall below) |
 | `provider` | no | a transport registered in this profile (`spawn`, `fork`, `acp`, `codex`, `claude-code`, `dsh-sdk`, …); default comes from the plugin row |
 | `llm_provider` / `model` / `reasoning_effort` / `max_tokens` | no | route the child to another model; needs a provider with `agentOptions` (`spawn`/`fork`/`dsh-sdk`) |
 | `persona` | no | extra system prompt for this child only; needs `persona` (`spawn`/`fork`) |
@@ -65,6 +65,7 @@ Hyphens may replace underscores (`max-depth` = `max_depth`). Unknown keys, wrong
 - **Tools that only read** — there is no read-only permission preset per definition. Approximate it with `[tools] deny = ["write", "edit"]` and deny shell tools too (`pwsh` on Windows, `bash`/`terminal` elsewhere). Only `write`/`edit` are portable.
 - **Tool names are deployment-specific** — do not deny `bash` on a Windows profile; it fails loud with the known names. When unsure, deny `write`/`edit` only.
 - **`output_schema` with `mode = "continuable"`** — invalid combination; a structured result belongs to a one-shot run.
+- **`mode = "continuable"` returns a child id, not an answer.** The prompt is queued when the call returns; the child's output arrives later as an inbox message. Continuing that same child needs the official subagent control tool (`send_message` with `agent_id`, parent and direct continuable child only) — a profile that enables Agent Teams disables that plugin and mounts a same-named tool that addresses teammates by `target` instead. Never tell the user a continuable child can be continued unless that control tool is in the composition.
 - **Model routing on an out-of-process provider** — `acp`/`codex`/`claude-code` accept none of `model`, `persona`, `tools`, `max_depth`, `output_schema`; the definition then fails at call time with the reason.
 - **Long personas** — a persona is not a place for the task itself; keep the task in the `prompt` the caller passes.
 
