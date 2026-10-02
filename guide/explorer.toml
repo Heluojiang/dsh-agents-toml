@@ -1,0 +1,55 @@
+# 示例 1：可继续的轻量探索子代理
+#
+# 演示：mode = "continuable"（拿到子代理 id 后可反复追问）+ 子代理模型路由（跑在便宜快的模型上）。
+#
+# 用法：复制到 $DSH_HOME/agents/ 或已信任的 <项目根>/.dsh/agents/，下一次委派即可用
+#      agent_type = "explorer"（无需重启）。
+#
+# 注释约定：
+#   [必填] 缺少会让该定义在解析期失败（其余定义不受影响）
+#   [可选] 省略时按括号里的默认行为执行
+# 每个键的类型、可选项与能力要求见 README 的「TOML 字段参考」。
+
+# [必填] agent_type 的取值；须匹配 [A-Za-z0-9][A-Za-z0-9_-]{0,63}
+name = "explorer"
+
+# [必填] 非空。模型据此决定何时选它，写清"什么时候该用"
+description = "代码库探索与定位：快速找文件、找符号、回答结构性问题。"
+
+# [可选] 默认 true。false 时不会出现在 agent_type 列表与工具描述里，显式调用报 "is disabled"
+enabled = true
+
+# [可选] 默认 "one-shot"。continuable = 立即返回 `started subagent <childId>`，
+#        之后可用 send_message 继续同一个子代理（它保留自己的上下文）
+mode = "continuable"
+
+# [可选] 默认取插件行 defaultProvider（默认 spawn）。
+#        可用值取决于该 profile 注册了哪些 provider（官方示例：spawn / fork / acp / codex / claude-code / dsh-sdk）
+provider = "spawn"
+
+# --- 可选：子代理自己的模型路由（需要 provider 能力 agentOptions：spawn / fork / dsh-sdk）---
+# 让探索跑在便宜快的模型上，父会话继续用主模型
+llm_provider = "deepseek-official"
+model = "deepseek-v4-flash"
+# reasoning_effort = "low"    # 可选：推理档位（off/low/high/max，随 provider 而定）
+# max_tokens = 8192           # 可选：正整数，子代理单次生成上限
+
+# [可选] 省略则取 Host 的 subagent.maxDepth（通常为 1）。
+#        语义：约束"本定义创建出的子代理"的绝对深度 —— 1 = 允许本次委派，但它不能再往下委派。
+#        0 永远不成立（子代理深度至少为 1），因此在解析期就判失败。
+max_depth = 1
+
+# [可选] 从子代理的提示词里移除并拒绝执行这些工具（只能做减法，需要 provider 能力 toolFilter）。
+#        名字必须是**本部署真实注册**的工具：写错不会静默忽略，而是在委派时报错并列出已知工具名。
+[tools]
+deny = ["write", "edit"]
+# deny = ["write", "edit", "pwsh"]    # Windows headless / web：连 shell 一起禁掉
+# allow = ["read", "grep", "glob"]    # 也可以改用白名单：只允许这些
+
+# --- 本例未启用的可选键（按需取消注释，注意括号里的约束）---
+# persona = """
+# 只作用于该子代理的补充系统提示，会遮蔽部署 persona。（需要 provider 能力 persona）
+# """
+# output_schema = { type = "object", properties = { summary = { type = "string" } }, required = ["summary"] }
+# ↑ 让子代理返回结构化结果（需要 provider 能力 outputSchema），且**只能**配 mode = "one-shot"，
+#   与本文件上面的 continuable 互斥。

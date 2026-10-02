@@ -1,6 +1,9 @@
-# dsh-agents-toml 功能说明
+# dsh-agents-toml 技术文档
 
-> 本文档描述**当前已实现**的功能与边界，与 `src/` 代码一一对应。安装步骤见 [README](../README.md)，真机验证结论见第 10 节。
+> 本文档面向**维护者与深入使用者**，描述当前已实现的机制、规则与边界，与 `src/` 代码一一对应。
+>
+> **面向使用者的内容在 [README](../README.md)**：安装步骤、四个设置项的作用、TOML 完整示例与逐字段参考表。
+> 本文不重复那些内容，只讲"为什么这样、内部如何判定、出错时的确切原因"。
 
 ## 1. 定位
 
@@ -11,7 +14,7 @@
 | 能力 | 实现状态 | 说明 |
 |---|---|---|
 | 用户级定义 | ✅ | `$DSH_HOME/agents/*.toml`，始终加载 |
-| 项目级定义 | ✅ | `<projectRoot>/.dsh/agents/*.toml`，**默认关闭**，需 `trustProjectAgents: true`（一键开启见 §3.1） |
+| 项目级定义 | ✅ | `<projectRoot>/.dsh/agents/*.toml`，**默认关闭**，需 `trustProjectAgents: true`（开启方式见 [README](../README.md#开启项目级子代理)） |
 | 项目根判定 | ✅ | 会话 cwd 向上最近的含 `.git` 目录；找不到则用 cwd 本身 |
 | 同名优先级 | ✅ | 项目覆盖用户；**同一目录内重名 → 两个都判失败** |
 | 单工具 + `agent_type` | ✅ | 一个工具，`agent_type` 枚举按该 Agent 的定义集生成，省 schema token |
@@ -28,77 +31,45 @@
 | 子代理模型路由 | ✅ | `llm_provider` / `model` / `reasoning_effort` / `max_tokens` |
 | 只读子代理 | ⚠️ 近似 | 只能用 `[tools] deny` 限制工具；**权限预设/沙箱/审批不可按定义设置**（见第 11 节） |
 | 失败可视 | ✅ | 日志 warn + 工具描述列出不可用定义 + 调用时明确报错 |
-| 插件页配置 | ✅ | 挂在**本插件自己的插件页**上（插件 → 已安装 → dsh-agents-toml），改 4 个 volatile 字段，保存即生效（见 §3.1） |
+| 插件页配置 | ✅ | 挂在**本插件自己的插件页**上（插件 → 已安装 → dsh-agents-toml），改 4 个 volatile 字段，保存即生效（见 §3） |
 
 ## 3. 插件行配置
 
-写进 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`（插件页目前没有本插件的配置表单，见 §3.1）：
+**该行由本 bundle 的 `cordis.patch.yml` 在安装时自动插入**（`id: dsh-agents-toml`），7 个配置键全部有 schema 默认值，因此 `config` 整段可以完全不写。使用者要改配置时优先用插件页设置项（见 [README](../README.md#插件设置项)）；本文只说明每个键的确切语义。
 
-```yaml
-- id: dsh-agents-toml
-  config:
-    trustProjectAgents: false      # 是否允许项目目录的定义（默认 false）
-    toolName: subagent_custom      # 模型看到的工具名（默认 subagent_custom）
-    defaultProvider: spawn         # 定义未指定 provider 时用的传输（默认 spawn）
-    projectAgentsDir: .dsh/agents  # 项目内相对目录（默认 .dsh/agents）
-    watchDefinitions: true         # 监听定义目录并热重装（默认 true）
-    reportFailuresToModel: true    # 在工具描述里列出不可用定义（默认 true）
-    userAgentsDir: 'D:/my/agents'  # 可选：覆盖用户目录（默认 $DSH_HOME/agents）
-```
+| 键 | 默认值 | 读取方式 | 语义 |
+|---|---|---|---|
+| `trustProjectAgents` | `false` | 每次发现定义时读取 | 是否让 `<projectRoot>/<projectAgentsDir>` 参与发现 |
+| `toolName` | `subagent_custom` | 每次安装工具时读取 | 注册到 `ctx.tools.register` 的工具名 |
+| `watchDefinitions` | `true` | 每次打开目录监听前读取 | 关闭后不再开 `fs.watch`，`agent_type` 列表停止自动刷新 |
+| `reportFailuresToModel` | `true` | 每次安装工具时读取 | 是否把失败定义写进工具描述 |
+| `defaultProvider` | `spawn` | 每次调用时读取 | 定义未写 `provider` 时使用的传输名 |
+| `projectAgentsDir` | `.dsh/agents` | 每次发现定义时读取 | 项目根下的相对目录 |
+| `userAgentsDir` | 未设置 | 每次发现定义时读取 | 覆盖用户级目录（绝对路径） |
 
-注意：patch 是整段替换 `config`，但未写的字段由 schema 默认值补齐，所以只写要改的项即可。
+前四项声明为 **`.volatile()`**，因此有两个后果：
+
+1. **只有 volatile 字段能做进 Host 的设置表单**（`dsh-settings` 的规则），这也是设置项恰好是这四项的原因；后三项属于部署布局，只能在补丁里改。
+2. **Host 对每个 volatile 字段只维护一个稳定引用并原地更新**，写入设置项时不会重挂载该行。因此 `src/plugin.ts` 不缓存取值，而是每次需要时调用 `config.<key>.get()`；任何在 apply 时快照取值的写法都会在该行不重载的情况下读到过期值（真机实测过这个缺陷）。
 
 `$DSH_HOME` 解析：环境变量 `DSH_HOME`（去空白后非空）优先，否则 `~/.dsh`。
 
-### 3.1 开启项目级子代理
+### 配置写入后的生效路径
 
-项目级定义**默认关闭**：`<projectRoot>/.dsh/agents/*.toml` 随仓库分发，必须显式信任。
+| 路径 | 机制 | 结果 |
+|---|---|---|
+| 插件页设置项 | 写入 profile 的 Cordis 补丁 + 原地更新 volatile 引用 | 下一次委派即按新值执行；`agent_type` 列表在下一次安装时刷新 |
+| 手改 `cordis.patch.yml` | DSH 监听补丁文件并重载该行（开启 HMR 的 profile） | 同上，但需要一次重载 |
+| `--patch` 覆盖层 | 每次启动生效，不改 profile | 适合临时验证 |
 
-**首选：插件页配置。** 本插件自带客户端半边，注册到 `plugins.bundle.config`（键 = bundle 包名 `dsh-agents-toml`），因此配置显示在**它自己的插件页**里（插件 → 已安装 → dsh-agents-toml），而不是官方那一栏的独立卡片——`plugins.item` 属于官方设置页，bundle 的配置按契约就该走 `plugins.bundle.config`。可切换 `trustProjectAgents`、`toolName`、`watchDefinitions`、`reportFailuresToModel`；保存写入当前 profile 的 Cordis 补丁。这四个字段是 Host 的 volatile 引用，`src/plugin.ts` 每次读取时取当前值，因此**不需要重挂载该行**：下一次委派即按新设置执行（工具描述里的 `agent_type` 枚举在下一次安装时刷新）。
-
-**脚本化/无 GUI：** 用下面的幂等脚本改写 profile 补丁，或让 Creator 模式下的 agent 通过 `plugin_manager` 代改。四个开关各自的作用与场景示例见 [`examples/settings-explained.md`](../examples/settings-explained.md)。
-
-```powershell
-$profileName = 'web'                                                    # 你的 profile 名
-$dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
-$patch    = Join-Path $dshHome "profiles\$profileName\cordis.patch.yml"
-$manifest = Join-Path $dshHome "profiles\$profileName\package.json"
-$block = @(
-  ''
-  '# 允许 <projectRoot>/.dsh/agents/*.toml 的定义（dsh-agents-toml）'
-  '- id: dsh-agents-toml'
-  '  config:'
-  '    trustProjectAgents: true'
-)
-
-if (-not (Test-Path $manifest)) {
-  "profile 不存在：$manifest —— 先用 dsh --profile $profileName ... 初始化它"
-} elseif (-not ((Get-Content $manifest -Raw | ConvertFrom-Json).dsh.profile.bundles -contains 'dsh-agents-toml')) {
-  "该 profile 还没安装本插件，先运行：dsh plugin --profile $profileName add github:Heluojiang/dsh-agents-toml"
-} elseif ((Get-Content $patch -Raw) -match 'trustProjectAgents') {
-  "已存在 trustProjectAgents 配置，未修改：$patch"
-} else {
-  $lines = @(Get-Content $patch)
-  $code = @($lines | Where-Object { $_.Trim() -ne '' -and -not $_.TrimStart().StartsWith('#') })
-  if ($code.Count -eq 1 -and $code[0].Trim() -eq '[]') {
-    Set-Content -Path $patch -Encoding utf8 -Value (@($lines | Where-Object { $_.Trim() -ne '[]' }) + $block)
-  } else {
-    Add-Content -Path $patch -Encoding utf8 -Value $block
-  }
-  "已写入 $patch"
-}
-```
-
-脚本会先确认该 profile 确实装了本插件（否则 `- id: dsh-agents-toml` 指向不存在的行，`--dump-config` 打印 `patch: entry "dsh-agents-toml" not found`）；已配置则跳过；**默认的空补丁 `[]` 用替换而非追加** —— 在流式空序列后追加块序列会让 YAML 解析失败。
-
-生效时机（脚本改写补丁这条路）：开启 HMR 的 profile（`web` 默认）会重载该行，关闭 HMR 的 profile 需要重启；工具描述里的 `agent_type` 枚举在下一次安装（新建任务/新会话，或定义文件变化）时刷新。验证：
+验证（无需启动服务）：
 
 ```powershell
 dsh --profile web --dump-config > $env:TEMP\dump.txt
-Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,6
+Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 ```
 
-临时试用可改用 `dsh web --patch .\trust-project.patch.yml`（不改 profile）。
+若输出里出现 `patch: entry "dsh-agents-toml" not found`，说明该 profile 没有安装本插件，补丁里的 `- id:` 指向了不存在的行。
 
 ## 4. 定义文件规范
 
@@ -116,26 +87,9 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,6
 
 ### 4.2 字段
 
-```toml
-name = "reviewer"                    # 必填，唯一；模型用它填 agent_type
-description = "只读代码审查"           # 必填；模型据此选择该子代理
-enabled = true                        # 默认 true；false 时不进枚举，调用会报 "is disabled"
-mode = "one-shot"                     # "one-shot"（默认，等结果）| "continuable"（后台持久子代理）
-provider = "spawn"                    # 传输名；省略则用 defaultProvider
-llm_provider = "deepseek-official"    # 子代理 LLM 路由 provider
-model = "deepseek-v4-flash"
-reasoning_effort = "high"
-max_tokens = 4096                     # 正整数
-persona = """对子代理的系统提示补充"""
-max_depth = 1                         # 被创建子代理的绝对深度上限；最小 1
-output_schema = { type = "object", properties = { summary = { type = "string" } }, required = ["summary"] }
+字段清单、类型、可选项、默认值与"所需能力"的对照表在 [README · TOML 字段参考](../README.md#toml-字段参考)；本节只讲**校验与解析**这一侧的实现。
 
-[tools]
-allow = ["read", "grep"]              # 可选
-deny = ["write", "edit"]              # 可选
-```
-
-键名允许用 `-` 代替 `_`（`llm-provider` ≡ `llm_provider`）。
+键名先做 `-` → `_` 归一化（`llm-provider` ≡ `llm_provider`），再与已知键集合比对；任何未列出的键都判失败。
 
 ### 4.3 校验规则（全部 fail loud）
 
@@ -213,22 +167,32 @@ deny = ["write", "edit"]              # 可选
 |---|---|
 | 增删改 `*.toml` | **不需要**：调用时重读；`watchDefinitions` 开启时枚举同步刷新（防抖 200ms） |
 | 关闭 `watchDefinitions` | 新名字要等该 Agent 下次创建才进枚举，但直接调用新名字仍即时生效 |
-| 插件行 `config` 变更 | 走 DSH 的配置 HMR（开启 HMR 的 profile） |
+| 插件页设置项写入 | **不需要**：写入 profile 补丁的同时原地更新 volatile 引用，该行不重载，下一次委派即生效 |
+| 手改 `cordis.patch.yml` | 开启 HMR 的 profile 会重载该行；关闭 HMR 的 profile 需要重启 |
 | 安装/卸载插件 bundle | web profile（默认开 HMR）不需要重启；HMR 关闭的 profile 需要 |
-| 升级插件自身代码 | 已加载模块不热替换，建议重启 |
+| 升级插件自身代码 | 已加载模块不热替换，建议重启；刷新浏览器会重新拉取 `lib/client.js` |
 
 ## 9. 能力位映射
 
-| 定义字段 | 需要的提供方能力 | 实际支持者 |
-|---|---|---|
-| `llm_provider` / `model` / `reasoning_effort` / `max_tokens` | `agentOptions` | `spawn`、`fork`、`dsh-sdk` |
-| `persona` | `persona` | `spawn`、`fork` |
-| `tools.allow` / `tools.deny` | `toolFilter` | `spawn`、`fork` |
-| `max_depth` | `depthLimit` | `spawn`、`fork` |
-| `output_schema` | `outputSchema` | `spawn`、`fork`（且仅 `one-shot`） |
-| `mode = "continuable"` | `prepareContinuable` | `spawn`、`fork` |
+字段与能力的对照表在 [README · 生效条件](../README.md#生效条件能力位)。本节给出 `src/mapping.ts#capabilityFailure` 的**判定顺序与报错原文**——它是唯一的判据来源：
 
-`acp` / `codex` / `claude-code` 不声明任何启动能力，因此这些字段用在它们身上会让**该定义**判失败（不会静默忽略）。
+| 顺序 | 触发条件 | 报错原文 |
+|---|---|---|
+| 1 | 定义了 `llm_provider`/`model`/`reasoning_effort`/`max_tokens` 任一，但 provider 无 `agentOptions` | `child LLM routing is unsupported by this provider` |
+| 2 | 定义了 `persona`，但无 `persona` | `persona is unsupported by this provider` |
+| 3 | 定义了 `tools`，但无 `toolFilter` | `tool filtering is unsupported by this provider` |
+| 4 | 定义了 `max_depth`，但无 `depthLimit` | `an explicit depth cap is unsupported by this provider` |
+| 5 | 定义了 `output_schema`，但无 `outputSchema` | `a structured output schema is unsupported by this provider` |
+| 6 | 同时有 `output_schema` 与 `mode = "continuable"` | `a structured output schema applies to one-shot runs only` |
+| 7 | `mode = "continuable"` 且 provider 未实现 `prepareContinuable` | `continuable mode is unsupported by this provider` |
+
+这些检查在**调用期**执行（provider 的注册情况是运行时事实，安装期无法判定），报错统一包成：
+
+```
+subagent "x" cannot run on provider "codex": child LLM routing is unsupported by this provider
+```
+
+`acp` / `codex` / `claude-code` 声明 `NO_START_CAPABILITIES`（五项能力全无），因此在它们身上使用上述任一字段都会让该定义在调用时不可用；`dsh-sdk` 只有 `agentOptions`。
 
 ## 10. 真机验证结论
 
@@ -279,12 +243,49 @@ deny = ["write", "edit"]              # 可选
 客户端契约：`ctx.slots.{inject,register}`、`ctx.locale.{bind,register}`、`ctx.configForms.{get,whileServed}`、`ctx.effect`。
 运行时依赖仅 `@deepseek-ai/schemastery`（Config schema）与 `smol-toml`；构建用 `tsc` 产出 ESM + `.d.ts`，客户端半边用 `tsc`（CJS）+ `scripts/build-client.mjs` 产出 `lib/client.js`，**不需要打包器**。
 
-## 13. 测试
+## 13. 测试与构建
 
 ```sh
-npm run check   # tsc 类型检查（宿主 + 客户端两个面）+ node --test
+npm run check     # typecheck:host + typecheck:client + check:docs + test
+npm run build     # build:host（tsc → lib/*.js、lib/types/*.d.ts）+ build:client（tsc CJS → 包装成 lib/client.js）
+npm run test      # 只跑测试；pretest 会先重建 lib/client.js
 ```
 
-67 个单测覆盖：TOML 解析与全部校验分支、目录优先级与重名、能力位矩阵、请求映射（含 continuable 字段裁剪）、工具 schema 与入参校验、委派成功/失败/取消、按 Agent 安装与释放、watcher 重装、卸载清理、激活前已存在 Agent 的补装、设置写入后无需重挂载即生效（volatile 惰性读取），以及客户端产物的加载器握手、导出契约、卡片渲染与开关暂存（`lib/client.js` 缺失时自跳过）。
+- **两个编译面**：宿主用 `tsconfig.json` / `tsconfig.build.json`（ESM + 声明），客户端用 `tsconfig.client.json`（CJS，`removeComments`，输出到临时目录后由 `scripts/build-client.mjs` 包装）。两者互不包含对方的源文件（根配置 `exclude: ["src/client"]`）。
+- **`pretest` 会先构建客户端产物**：产物级测试读取真实的 `lib/client.js`，不先重建就会测到旧产物（这个坑真的踩过）。
+- **68 个单测**覆盖：TOML 解析与全部校验分支、目录优先级与重名、能力位矩阵、请求映射（含 continuable 的字段裁剪）、工具 schema 与入参校验、委派成功/失败/取消、按 Agent 安装与释放、watcher 重装、卸载清理、激活前已存在 Agent 的补装、volatile 惰性读取（设置写入后无需重挂载即生效）。
+- **产物级测试**（`tests/client-artifact.spec.ts`）在 Node 里用桩模块表执行真实的 `lib/client.js`，断言：加载器握手格式、导出契约（`apply`/`inject`/`NS`/`ENTRY_ID`/`BUNDLE_NAME`）、**只注册 `plugins.bundle.config` 一个插槽且键为 bundle 包名**（不得出现 `plugins.item`）、卡片渲染与开关暂存。产物缺失时该测试自跳过。
+- 测试使用假 `ctx` 与内存文件系统，**不启动 DSH、不读写真实 `$DSH_HOME`**。
+- 发布注意：`package.json` 的 `private: true` 是开发态防误发布；`files` 需要覆盖运行时会用到的全部相对产物与文档（`lib`、`cordis.patch.yml`、`README.md`、`guide`）。
 
-测试使用假 `ctx` 与内存文件系统，**不启动 DSH、不读写真实 `$DSH_HOME`**。
+## 14. 安装路径与构建脚本放行
+
+| 路径 | 行为 |
+|---|---|
+| `dsh plugin add <本地目录>` | 以 link 方式加入 profile；改代码后重启该进程即可生效 |
+| `dsh plugin add dsh-agents-toml` | 走 npm 包（发布后） |
+| `dsh plugin add github:<you>/dsh-agents-toml#<sha>` | 克隆源码后在包内执行 `prepare`（= `npm run build`），因此安装副本自带 `lib/`（含客户端半边） |
+
+pnpm ≥10 默认拦截依赖的构建脚本：第一次 `add` 会以 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` 失败，并打印放行所需的**完整 key**（被规范化成 codeload tarball URL 且带提交 SHA）。把它追加到 `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml` 的 `allowBuilds:` 下再重跑。只写裸包名不足以放行；SHA 随提交变化，更新提交后要补新 key。放行构建脚本等同于允许该包以你的权限执行代码，因此只放行自己信任的仓库并固定提交。
+
+## 15. 客户端半边
+
+- **发现方式**：`dsh-client-modules` 扫描 Host Loader 的**行**，对每行解析到的包读取 `package.json` 的 `dsh.client` 声明；本插件复用已有的宿主行（`dsh-agents-toml`），因此不需要额外的客户端行。声明要求存在 `./client` 导出，否则扫描直接抛错。
+- **产物契约**：`lib/client.js` 必须是**一个** CommonJS 文件，被 `window.__ModuleLoader__.load({ id, factory })` 包住；factory 的参数 `require` 就是模块表——只有基线模块可用（`react`、`react/jsx-runtime`、`react-dom`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、`@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-dockkit`）。**不能有同步的相对 `require`**（运行时不会加载同包的兄弟 chunk），因此整个客户端半边写成一个文件。
+- **构建方式**：`tsc -p tsconfig.client.json` 产出 CJS → `scripts/build-client.mjs` 加 wrapper，并断言没有相对 require、没有重复注册，最后删掉临时目录。不需要打包器（本包没有 esbuild/rolldown 依赖）。
+- **类型来源**：npm 上发布的 `@deepseek-ai/dsh-client-*` 版本落后于运行时（`0.0.1-rc.1` vs 运行时的 `0.2.x`），因此本包不依赖它们，而用 `src/client/shell-modules.d.ts` 声明**模块表契约**（只声明用到的 API），宿主侧同理用结构性类型（`src/host.ts`）。
+- **注册**：`ctx.configForms.whileServed([ENTRY_ID], …)` + `ctx.slots.inject('plugins.bundle.config', …)`，键为 bundle 包名。`plugins.item` 属于官方设置页，用它会出现在"官方"栏；bundle 自己的配置按插槽契约走 `plugins.bundle.config`，渲染在插件自身页面上。
+
+## 16. 隔离式端到端验证步骤
+
+真机验证请使用一次性 Harness home 与一次性 profile，别碰正在使用的 profile：
+
+```powershell
+$env:DSH_HOME = 'D:\temp\dsh-plugin-e2e\home'
+dsh --profile plugin-dev --from-default-profile web
+dsh plugin --profile plugin-dev add D:\Work\Codes\Others\dsh-agents-toml
+dsh --profile plugin-dev --dump-config | Select-String dsh-agents-toml
+dsh --profile plugin-dev --port 3099 --no-open     # 控制台会打印带 token 的 URL
+```
+
+验证要点：`--dump-config` 里出现插件行与 `config`；启动后新任务里能看到该工具与 `agent_type` 列表；真机委派后检查会话日志（`sessions/.../session.v4.jsonl.zstd`，多帧 zstd）里的 `tool/call`、`subagent/catalog` 与子会话文件。设置项的写入可以直接观察 profile 的 `cordis.patch.yml` 是否被更新。

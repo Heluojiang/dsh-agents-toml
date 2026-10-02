@@ -2,14 +2,12 @@
 
 用 TOML 文件给 DeepSeek Harness 声明**具名子代理**的插件。它不修改 DSH 源码，作为普通 bundle 通过 `dsh plugin add` 安装。
 
-> 完整功能与边界（字段语义、能力位映射、失败可见性、真机验证结论、明确不支持的能力）见 **[docs/FEATURES.md](docs/FEATURES.md)**。
+- **一个工具 + `agent_type` 参数**：模型只看到 `subagent_custom`（名字可配）这一个委派工具，用 `agent_type` 选择委派给谁，而不是每个定义多一份工具 schema。
+- **两层目录**：`$DSH_HOME/agents/*.toml`（全局，始终加载）与 `<projectRoot>/.dsh/agents/*.toml`（项目级，**默认关闭**，需显式信任）。同名时项目定义覆盖全局定义。
+- **失败互不牵连**：某个定义写错或用了当前 provider 不支持的能力时，只有该定义不可用（日志 + 工具描述说明原因），其余照常，且**绝不会导致 Agent 创建失败**。
+- **热生效**：定义文件在每次委派时重新读取；目录 watcher 让模型看到的 `agent_type` 列表同步刷新。
 
-- **一个工具 + `agent_type` 参数**：模型看到 `subagent_custom`（名字可配）一个工具，用 `agent_type` 选择要委派的子代理，而不是每个定义多一份工具 schema。
-- **两层目录**：`$DSH_HOME/agents/*.toml`（全局，始终加载）与 `<projectRoot>/.dsh/agents/*.toml`（项目级，默认关闭，需显式信任）。同名时项目定义覆盖全局定义。
-- **失败可见、互不牵连**：某个定义写错或用了 provider 不支持的能力时，只有该定义不可用（日志 + 工具描述里说明原因），其余定义照常工作，且**绝不会导致 Agent 创建失败**。
-- **热生效**：定义文件在每次调用时重新读取，改完下一次委派即生效；目录 watcher 会在增删文件后重装工具，让 schema 里的 `agent_type` 列表同步更新。
-
-本插件按 DSH 的函数式插件约定编写（`name` / `inject` / `Config`(Schemastery) / `apply`），注册走 `ctx.tools.register`，按 Agent 作用域安装（`agent.ctx.inject`），清理走 `ctx.effect`。它**不 import 任何 `@deepseek-ai/dsh-*` 内部包**：工具注册表只校验输出 schema（`packages/core/tools/src/index.ts` 的 `register` 只 `assertSupportedJsonSchema(output.schema)`，入参由工具自己校验），其余都是结构性 ctx 方法，因此在 npm 上发布版本落后于运行时版本的情况下仍可加载。
+**文档导航**：[安装](#安装) · [插件设置项](#插件设置项) · [插件行配置](#插件行配置通常无需手改) · [TOML 字段参考](#toml-字段参考) · [示例定义](guide/explorer.toml) · [技术文档](guide/technical.md) · [开关场景讲解](guide/settings-explained.md)
 
 ## 安装
 
@@ -25,9 +23,9 @@ dsh plugin --profile web add D:\Work\Codes\Others\dsh-agents-toml
 dsh plugin --profile web add dsh-agents-toml
 ```
 
-> 当前 `package.json` 里保留了 `private: true`（开发态防误发布）。要发布到 npm，删掉该字段后 `npm publish`；`prepare` 脚本会先构建（宿主 + 客户端两个面）。
+> `package.json` 里保留了 `private: true`（开发态防误发布）。要发布到 npm，删掉该字段后 `npm publish`；`prepare` 脚本会先构建（宿主 + 客户端两个面）。
 
-安装后，**web profile 会自动加载本插件的客户端半边**（`dsh.client` 清单 + `./client` 导出，构建产物 `lib/client.js`），无需额外步骤；`headless` / `sdk` / `acp` 等没有 GUI 的 profile 会忽略它。
+安装后，**web profile 会自动加载本插件的客户端半边**（`dsh.client` 清单 + `./client` 导出，产物 `lib/client.js`），无需额外步骤；`headless` / `sdk` / `acp` 等没有 GUI 的 profile 会忽略它。
 
 ### GitHub
 
@@ -35,23 +33,17 @@ dsh plugin --profile web add dsh-agents-toml
 dsh plugin --profile web add github:<you>/dsh-agents-toml
 ```
 
-git 安装拿到的是源码，所以包内自带 `prepare` 脚本（`tsc -p tsconfig.build.json`）。pnpm ≥10 默认拦截依赖的构建脚本，第一次 `add` 会失败，并打印放行所需的**完整 key**（pnpm 会把它规范化成 codeload tarball URL 并带提交 SHA），例如实测输出：
+git 安装拿到的是源码，包内自带 `prepare` 脚本。pnpm ≥10 默认拦截依赖的构建脚本，第一次 `add` 会失败并打印放行所需的**完整 key**：
 
 ```
-ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED  The git-hosted package "dsh-agents-toml@0.1.0" needs to execute build scripts but is not in the "allowBuilds" allowlist.
-Add the package to "allowBuilds" in your project's pnpm-workspace.yaml to allow it to run scripts. For example:
+ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED  The git-hosted package "dsh-agents-toml@<版本>" needs to execute build scripts but is not in the "allowBuilds" allowlist.
 allowBuilds:
   dsh-agents-toml@https://codeload.github.com/<you>/dsh-agents-toml/tar.gz/<sha>: true
 ```
 
-把 **`allowBuilds:` 下面那一整行**追加到 `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml`，然后重跑 `add`。该文件已存在（含 `packages`、`nodeLinker`、`autoInstallPeers`），**追加，不要覆盖**。
+把 **`allowBuilds:` 下面那一整行**追加到 `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml`（该文件已存在，**追加，不要覆盖**），然后重跑 `add`。两个坑：只写裸包名 `dsh-agents-toml: true` **不足以**放行（pnpm 按完整 spec 匹配）；key 里的 SHA 随提交变化，更新到新提交后要把新打印的 key 也加进去。
 
-两个坑：
-
-- 只写裸包名 `dsh-agents-toml: true` **不足以**放行 git 依赖（pnpm 11 按完整 spec 匹配，实测被拒）。
-- key 里的 SHA 随提交变化；更新到新提交后需要把新打印的 key 也加进 `allowBuilds`。
-
-**放行构建脚本等于允许该包在你的机器上以你的权限执行代码**：只放行你自己信任的仓库，并固定提交（`github:you/dsh-agents-toml#<sha>`）以免后续推送改变实际执行的代码。
+**放行构建脚本等于允许该包以你的权限执行代码**：只放行你信任的仓库，并用 `github:<you>/dsh-agents-toml#<sha>` 固定提交。
 
 ### 不改 profile 的临时试用
 
@@ -70,41 +62,36 @@ dsh web --patch ./dev.patch.yml
 
 ### 生效时机（是否需要重启）
 
-| 动作 | 开启 HMR 的 profile（`web` 默认开启） | 关闭 HMR 的 profile（`headless` / `sdk` / `acp` / `sdk-minimal`） |
+| 动作 | 开启 HMR 的 profile（`web` 默认） | 关闭 HMR 的 profile（`headless` / `sdk` / `acp` / `sdk-minimal`） |
 |---|---|---|
-| 安装/卸载本插件 bundle | 不需要重启：DSH 监听 profile 的 `package.json`（`dsh.profile.bundles`）与 patch 文件并在变化时重组 | 需要重启 |
-| 新增/修改 `*.toml` 定义 | 不需要重启（下次调用即生效；watcher 会刷新工具 schema） | 同左 |
-| 在**插件页设置**里改配置 | 不需要重启：volatile 引用原地更新，下一次委派即生效（仅 `agent_type` 枚举等要等下一次安装） | 不适用（无 GUI） |
+| 安装/卸载本插件 bundle | 不需要重启（DSH 监听 profile 的 `package.json` 与 patch 文件） | 需要重启 |
+| 新增/修改 `*.toml` 定义 | 不需要重启（下次调用即生效；watcher 刷新工具 schema） | 同左 |
+| 在**插件设置项**里改配置 | 不需要重启：volatile 引用原地更新，下一次委派即生效（仅 `agent_type` 列表要等下一次安装） | 不适用（无 GUI） |
 | 手改 `cordis.patch.yml` | 不需要重启（补丁文件被监听，该行重载） | 需要重启 |
-| 升级本插件自身版本（含客户端半边） | Host 模块不会热替换，建议重启；浏览器刷新会重新拉取 `lib/client.js` | 需要重启 |
+| 升级本插件版本（含客户端半边） | Host 模块不热替换，建议重启；刷新浏览器会重新拉取 `lib/client.js` | 需要重启 |
 
-## 开启项目级子代理（装完必看）
+## 插件设置项
 
-**项目级定义默认是关闭的。** `<projectRoot>/.dsh/agents/*.toml` 会随 `git clone` 一起到来，所以插件默认只加载用户级 `$DSH_HOME/agents/*.toml`，必须显式信任才读取项目目录（忽略时会打印一行 info 日志说明）。
+安装后在插件页里可以看到本插件**自己的配置区**：打开「插件」→「已安装」→ 点击 `dsh-agents-toml`。
 
-### 方式一：插件页里的配置（web GUI，推荐）
-
-本插件自带客户端半边，配置就挂在**它自己的插件页**上：打开「插件」→「已安装」→ 点击 `dsh-agents-toml`，页面里直接就是这些控件（不是官方那一栏的独立卡片）：
-
-| 控件 | 对应配置 | 说明 |
+| 设置项 | 配置键 | 作用（一句话） |
 |---|---|---|
-| 信任项目级定义 | `trustProjectAgents` | 打开后加载 `<项目根>/.dsh/agents/*.toml` |
-| 工具名 | `toolName` | 模型看到的委派工具名（默认 `subagent_custom`） |
-| 监听定义目录 | `watchDefinitions` | 文件变化后重装工具、刷新 `agent_type` 枚举 |
-| 在工具描述里列出不可用定义 | `reportFailuresToModel` | 让模型看到被跳过的定义及原因 |
+| 信任项目级定义 | `trustProjectAgents` | 是否加载 `<项目根>/.dsh/agents/*.toml`（安全开关，默认关） |
+| 工具名 | `toolName` | 模型调用的**那把工具**叫什么（默认 `subagent_custom`） |
+| 监听定义目录 | `watchDefinitions` | 定义文件变化后是否立刻刷新模型看到的 `agent_type` 列表 |
+| 在工具描述里列出不可用定义 | `reportFailuresToModel` | 是否把失败定义及原因写给模型看 |
 
-四个开关到底影响什么（含具体场景、以及"模型看到什么"与"调用时读什么"的区别），见 **[examples/settings-explained.md](examples/settings-explained.md)**。一句话版：
+每个开关的具体场景（含"开着/关掉分别是什么现象"、以及"模型看到什么"与"调用时读什么"的区别）见 **[guide/settings-explained.md](guide/settings-explained.md)**。保存会写入当前 profile 的 Cordis 补丁，**无需重启**。
 
-- **信任项目级定义**（安全开关）：是否读取随仓库分发的项目定义。关着时项目定义完全不加载，只加载用户级 `$DSH_HOME/agents`。
-- **工具名**：模型调用的**那把工具**叫什么。注意它与 TOML 里的 `name`（即 `agent_type` 的取值，如 `reviewer`）是两回事——改名不用动任何 TOML。用途：避免与其他插件重名报 `already registered`、或让模型在官方 `subagent` 等工具之间更好选。
-- **监听定义目录**：定义文件变化后是否**立刻**重装工具、刷新模型看到的 `agent_type` 列表。关掉不影响"调用时"读到的文件内容，只是模型事先看不到新名字。
-- **在工具描述里列出不可用定义**：把失败定义及原因写给模型看（原因**同时始终**写入 Host 日志）。关掉可省 token、减少噪音，代价是模型说不出"某个子代理为什么不可用"（调用失败时仍会返回带原因的错误）。
+> 注意区分两个名字：**工具名**是模型调用的工具（`subagent_custom`）；**`agent_type`** 是委派给哪个定义（`reviewer`、`explorer`，由 TOML 的 `name` 决定）。改工具名不需要动任何 TOML。
 
-保存即写入当前 profile 的 Cordis 补丁，**无需重启**：这几个字段是 Host 的 volatile 引用，插件每次读取时取当前值——下一次委派就按新设置走（实测：关掉开关后工具描述里的项目级定义立即消失，打开后立即回来）。
+### 开启项目级子代理
 
-### 方式二：直接改 profile 补丁（无 GUI / 需要脚本化时）
+项目级定义默认关闭，因为 `<projectRoot>/.dsh/agents/*.toml` 会随 `git clone` 一起到来（忽略时日志会记一行说明）。
 
-一键脚本（PowerShell，幂等）：
+**方式一（推荐）**：上面的设置项里打开「信任项目级定义」。
+
+**方式二（无 GUI / 脚本化）**：把下面这段追加到 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`。脚本是幂等的，并会处理"补丁还是默认空序列 `[]`"的情况：
 
 ```powershell
 $profileName = 'web'                                                    # 你的 profile 名
@@ -122,7 +109,7 @@ $block = @(
 if (-not (Test-Path $manifest)) {
   "profile 不存在：$manifest —— 先用 dsh --profile $profileName ... 初始化它"
 } elseif (-not ((Get-Content $manifest -Raw | ConvertFrom-Json).dsh.profile.bundles -contains 'dsh-agents-toml')) {
-  "该 profile 还没安装本插件，先运行：dsh plugin --profile $profileName add github:Heluojiang/dsh-agents-toml"
+  "该 profile 还没安装本插件，先运行：dsh plugin --profile $profileName add github:<you>/dsh-agents-toml"
 } elseif ((Get-Content $patch -Raw) -match 'trustProjectAgents') {
   "已存在 trustProjectAgents 配置，未修改：$patch"
 } else {
@@ -138,159 +125,157 @@ if (-not (Test-Path $manifest)) {
 }
 ```
 
-脚本做三件事：确认该 profile 真的装了本插件（否则 `- id: dsh-agents-toml` 会指向不存在的行，`--dump-config` 打印 `patch: entry "dsh-agents-toml" not found`）；已在则跳过（幂等）；**空补丁 `[]` 用替换而不是追加**，避免 YAML 解析失败。
+验证与其余方式（`--patch` 临时启用、让 agent 代改）见 [技术文档 · 插件行配置](guide/technical.md#3-插件行配置)。
 
-生效时机：手改补丁后，开启 HMR 的 profile（`web` 默认）会重载该行，关闭 HMR 的 profile 需要重启；工具描述里的 `agent_type` 枚举在**下一次安装**（新建任务/新会话，或定义文件变化）时刷新。相比之下，**插件页开关**走 Host 的 volatile 引用原地更新，下一次委派就按新设置执行，不需要重载。
+## 插件行配置（通常无需手改）
 
-### 验证
+本插件的 bundle 自带 `cordis.patch.yml`，**安装时已经自动插入了这一行**；它的 7 个配置键**全部有默认值**，所以：
 
-```powershell
-dsh --profile web --dump-config > $env:TEMP\dump.txt
-Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,6
-```
+- **一个键都不写也能正常工作**——`config` 整段可以完全不存在；
+- 需要改时，优先用上面的**插件设置项**（4 个键有 UI，保存会替你写进 profile 补丁）；
+- 另外 3 个键是"部署布局"，没有 UI，需要时手写进 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`。
 
-应看到（补丁层里的这一行）：
-
-```yaml
-# == ...\profiles\web\cordis.patch.yml
-- id: dsh-agents-toml
-  name: dsh-agents-toml
-  config:
-    trustProjectAgents: true
-```
-
-### 其余方式
-
-- **临时试用**：`dsh web --patch .\trust-project.patch.yml`（文件内容同上，不改 profile）。
-- **让 agent 代改**：启用 Creator 模式后说"把 dsh-agents-toml 的 trustProjectAgents 打开"，它通过 `plugin_manager` 写入当前 profile。
-
-### 开启前后对比
-
-| 目录 | 作用域 | 默认 | 开启后 |
+| 键 | 默认值 | 作用 | 有设置项？ |
 |---|---|---|---|
-| `$DSH_HOME/agents/*.toml` | 用户级（整机） | ✅ 始终加载 | ✅ |
-| `<projectRoot>/.dsh/agents/*.toml` | 项目级（随仓库） | ❌ 忽略并记一条 info | ✅ 同名覆盖用户级 |
+| `trustProjectAgents` | `false` | 是否加载项目目录的定义 | ✅ |
+| `toolName` | `subagent_custom` | 模型看到的工具名 | ✅ |
+| `watchDefinitions` | `true` | 定义目录变化后重装工具、刷新 `agent_type` 列表 | ✅ |
+| `reportFailuresToModel` | `true` | 在工具描述里列出不可用定义及原因 | ✅ |
+| `defaultProvider` | `spawn` | 定义未写 `provider` 时使用的传输 | ❌ 手改 |
+| `projectAgentsDir` | `.dsh/agents` | 项目内的相对目录 | ❌ 手改 |
+| `userAgentsDir` | 未设置（`$DSH_HOME/agents`） | 覆盖用户级定义目录（绝对路径） | ❌ 手改 |
 
-项目根 = 会话工作目录向上最近的含 `.git` 目录；找不到则用工作目录本身。
-
-## 目录与优先级
-
-| 目录 | 来源 | 是否默认加载 |
-|---|---|---|
-| `$DSH_HOME/agents/*.toml` | 用户级（对整台机器生效） | 是 |
-| `<projectRoot>/.dsh/agents/*.toml` | 项目级（随仓库分发） | **否**，需 `trustProjectAgents: true` |
-
-`$DSH_HOME` 默认为 `~/.dsh`。项目根 = 从会话工作目录向上找到的最近含 `.git` 的目录（与 DSH 技能发现一致），找不到就用会话工作目录本身。
-
-同名定义：项目覆盖全局；**同一个目录内重名则两个都判为失败**（不猜赢家）。非 `.toml` 文件被忽略。
-
-## 配置
-
-插件行的 `config`（写进 `$DSH_HOME/profiles/<name>/cordis.patch.yml`，或在插件页里改）：
+手改时的完整写法（patch 是整段替换 `config`，但没写的键会由 schema 默认值补齐，所以只写要改的项即可）：
 
 ```yaml
 - id: dsh-agents-toml
   config:
-    trustProjectAgents: false      # 是否允许项目目录的定义
-    toolName: subagent_custom      # 模型看到的工具名
-    defaultProvider: spawn         # 定义未指定 provider 时用的传输
-    projectAgentsDir: .dsh/agents  # 项目内相对目录
-    watchDefinitions: true         # 监听定义目录，变更后重装工具
-    reportFailuresToModel: true    # 在工具描述里列出不可用的定义
-    # userAgentsDir: 'C:/Users/you/.dsh/agents'   # 可选：覆盖用户目录
+    trustProjectAgents: true          # 打开项目级定义
+    defaultProvider: spawn            # 例：部署级默认传输
+    projectAgentsDir: .dsh/agents     # 例：项目内目录改名
+    # userAgentsDir: 'D:/my/agents'   # 例：把用户目录放到别处
 ```
 
-## `xxx.toml` 字段
+`$DSH_HOME` 解析：环境变量 `DSH_HOME`（去空白后非空）优先，否则 `~/.dsh`。
+
+## TOML 完整示例
+
+把文件放进 `$DSH_HOME/agents/`（或已信任的项目 `<项目根>/.dsh/agents/`），文件名随意，定义名由 `name` 决定。下面这份带全部键的注释说明，可直接作为模板：
 
 ```toml
-name = "reviewer"                    # 必填，唯一；模型用它填 agent_type
-description = "只读代码审查"           # 必填；模型据此选择
-enabled = true                        # 默认 true
-mode = "one-shot"                     # "one-shot"（默认，等待结果）| "continuable"（后台持久子代理）
-provider = "spawn"                    # 传输名：spawn/fork/acp/codex/claude-code/dsh-sdk…
-llm_provider = "deepseek-official"    # 子代理的 LLM 路由 provider（agentOptions.provider）
-model = "deepseek-v4-flash"
-reasoning_effort = "high"
-max_tokens = 4096
-persona = """
-你是代码审查者，只报告问题，不修改文件。
-"""
-max_depth = 1                          # 被创建子代理的绝对深度上限；省略则用 Host 设置（默认 1）
-output_schema = { type = "object", properties = { summary = { type = "string" } }, required = ["summary"] }
+name = "reviewer"                # 必填：agent_type 取值，须匹配 [A-Za-z0-9][A-Za-z0-9_-]{0,63}
+description = "只读代码审查"      # 必填：模型据此选择该子代理（非空）
 
-[tools]                                # 子代理可见/可执行的工具限制（仅进程内 provider）
-deny = ["write", "edit", "bash", "pwsh"]
+enabled = true                   # 可选，默认 true；false 时不出现在 agent_type 列表里
+mode = "one-shot"                # 可选，默认 "one-shot"；"continuable" 会立即返回子代理 id
+provider = "spawn"               # 可选，默认取插件行 defaultProvider（默认 spawn）
+
+# 以下四项是"子代理走哪个模型"的路由覆盖，需要 provider 支持 agentOptions
+llm_provider = "deepseek-official"   # 可选：子代理使用的 LLM provider
+model = "deepseek-v4-flash"          # 可选：子代理使用的模型
+reasoning_effort = "high"            # 可选：推理档位
+max_tokens = 4096                    # 可选：正整数
+
+persona = """                    # 可选：只作用于该子代理，遮蔽部署 persona
+你是资深代码审查者，只报告问题与依据，不修改文件。
+"""
+
+max_depth = 1                    # 可选，默认取 Host 的 subagent.maxDepth（默认 1）；最小 1
+output_schema = { type = "object", properties = { summary = { type = "string" } }, required = ["summary"] }
+                                 # 可选：对象根 JSON Schema；只能配 mode = "one-shot"
+
+[tools]                          # 可选：从提示词移除并拒绝执行这些工具（只能做减法）
+deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 ```
 
-键名允许用 `-` 代替 `_`（`llm-provider`、`max-depth` 等价）。**未知键与类型错误一律报错**，不会被静默忽略。
+**完整可运行的两个例子**：[`guide/explorer.toml`](guide/explorer.toml)（`continuable` + 子代理模型路由）、[`guide/reviewer.toml`](guide/reviewer.toml)（`one-shot` + 工具限制）。两者都逐键标注了必填/可选与省略时的行为。
 
-> `max_depth` 的语义容易踩坑：它约束的是**本定义创建出来的子代理**的绝对深度（父级为 0，直接子代理为 1），而不是"这个子代理还能不能再往下委派"。所以：
-> - `max_depth = 1`（推荐默认）：允许本次委派；子代理若再想委派，其深度 2 > 1 会被拒绝 —— 这才是"它不能再往下委派"。
-> - `max_depth = 0` **永远无法成立**（子代理深度至少为 1），因此本插件在解析阶段就把该定义判为失败，并给出原因，而不是让模型在运行时撞到 `subagent depth 1 exceeds maxDepth 0`。
+## TOML 字段参考
 
-### 各字段的生效条件（能力位）
+| 键 | 必填 | 类型 / 可选项 | 默认 | 作用与约束 |
+|---|---|---|---|---|
+| `name` | **是** | string，`[A-Za-z0-9][A-Za-z0-9_-]{0,63}` | — | `agent_type` 的取值。**同一目录内重名 → 两个定义都失败**；跨目录同名时项目覆盖用户 |
+| `description` | **是** | 非空 string | — | 模型选择该子代理的依据 |
+| `enabled` | 否 | `true` / `false` | `true` | `false`：不进 `agent_type` 列表与工具描述；显式调用报 `subagent "x" is disabled in <file>` |
+| `mode` | 否 | `"one-shot"` / `"continuable"` | `"one-shot"` | `one-shot`：等待子代理完成并返回文本；`continuable`：立即返回 `started subagent <childId>`，可用 `send_message` 继续 |
+| `provider` | 否 | 已注册的传输名（随 profile 而定，如 `spawn`/`fork`/`acp`/`codex`/`claude-code`/`dsh-sdk`） | 插件行 `defaultProvider`（`spawn`） | 未注册时调用报错并列出已注册的 provider 名 |
+| `llm_provider` | 否 | string | 不覆盖（继承父级路由） | 子代理的 LLM 路由 provider；需要 `agentOptions` |
+| `model` | 否 | string | 同上 | 子代理使用的模型；需要 `agentOptions` |
+| `reasoning_effort` | 否 | string | 同上 | 推理档位；需要 `agentOptions` |
+| `max_tokens` | 否 | 正整数 | 同上 | 生成长度上限；需要 `agentOptions` |
+| `persona` | 否 | 非空 string（多行用 `"""`） | 部署 persona | 只作用于该子代理；需要 `persona` |
+| `max_depth` | 否 | 整数 ≥ 1 | Host `subagent.maxDepth`（默认 1） | 本定义创建出的子代理的**绝对深度**上限；需要 `depthLimit` |
+| `output_schema` | 否 | TOML 表（对象根 JSON Schema） | — | 子代理返回结构化结果；需要 `outputSchema`，**且只能配 `one-shot`** |
+| `tools` | 否 | 表，子键 `allow` / `deny`（非空字符串数组） | 不限制 | 从子代理提示词移除**且**拒绝执行；需要 `toolFilter`。名字必须是本部署真实注册的工具 |
 
-| 字段 | 需要的 provider 能力 | 实际支持者 |
+键名允许用 `-` 代替 `_`（`llm-provider` ≡ `llm_provider`、`max-depth` ≡ `max_depth`）。**未知键与类型错误一律报错**，不会被静默忽略。
+
+### 生效条件（能力位）
+
+| 字段 | 需要的 provider 能力 | 支持的 provider |
 |---|---|---|
 | `llm_provider` / `model` / `reasoning_effort` / `max_tokens` | `agentOptions` | `spawn`、`fork`、`dsh-sdk` |
 | `persona` | `persona` | `spawn`、`fork` |
-| `tools.allow` / `tools.deny` | `toolFilter` | `spawn`、`fork` || `max_depth` | `depthLimit` | `spawn`、`fork` |
-| `output_schema` | `outputSchema` | `spawn`、`fork`（且只能配 `one-shot`） |
+| `tools.allow` / `tools.deny` | `toolFilter` | `spawn`、`fork` |
+| `max_depth` | `depthLimit` | `spawn`、`fork` |
+| `output_schema` | `outputSchema` | `spawn`、`fork`（且仅 `one-shot`） |
 | `mode = "continuable"` | `prepareContinuable` | `spawn`、`fork` |
 
-用了 provider 不具备的能力时，该定义被判为失败并在日志中给出原因（例如 `subagent "x" cannot run on provider "codex": child LLM routing is unsupported by this provider`），不会被静默忽略 —— 这与 DSH 自身的 fail-loud 语义一致。
+`acp` / `codex` / `claude-code` 不声明任何启动能力，因此把上述字段用在它们身上会让**该定义**失败。两类失败的时机不同，别混淆：
 
-**`tools.allow` / `tools.deny` 里的名字必须来自该部署实际注册的工具**，它们是部署相关的：Windows headless profile 只有 `pwsh`，web profile 还可能有 `bash`/`terminal`，其他平台是 `bash`。名字写错不会静默忽略，而是在委派时明确报错并列出已知工具名：
+- **解析期失败（文件写错）**：必填缺失、类型错误、未知键、`max_depth = 0`、`[tools]` 出现非 `allow`/`deny` 的键 —— 定义直接判失败并给出原因。
+- **调用期失败（能力不匹配）**：provider 是否具备某项能力只有在委派那一刻才能确定，因此报错形如
+  `subagent "x" cannot run on provider "codex": child LLM routing is unsupported by this provider`。
+
+### `max_depth` 的语义
+
+它约束的是**本定义创建出来的子代理**的绝对深度（父级为 0，直接子代理为 1），而不是"这个子代理还能不能再往下委派"：
+
+- `max_depth = 1`（推荐）：允许本次委派；子代理若再想委派，其深度 2 > 1 会被拒绝 —— 这才是"它不能再往下委派"。
+- `max_depth = 0` **永远无法成立**（子代理深度至少为 1），因此本插件在解析阶段就判该定义失败并说明原因，而不是让模型在运行时撞到 `subagent depth 1 exceeds maxDepth 0`。
+
+### `[tools]` 里的名字是部署相关的
+
+`tools.allow` / `tools.deny` 的名字必须来自**该部署实际注册的工具**：Windows headless profile 只有 `pwsh`，web profile 还可能有 `bash`/`terminal`，其他平台是 `bash`。写错不会静默忽略，而是在委派时明确报错并列出已知工具名：
 
 ```
 Error: tools.restrict() names unknown global tools "bash", "terminal";
 known global tools: create_goal, edit, …, pwsh, read, write
 ```
 
-因此 `examples/reviewer.toml` 只 deny 每个部署都有的 `write`/`edit`，并把 shell 工具的 deny 行留作注释，按你的部署取消注释。
+所以示例只 deny 每个部署都有的 `write`/`edit`，shell 工具的 deny 行以注释保留，按你的部署取消注释。
 
-### 不能配置的项（重要）
+### 不能配置的项
 
-- **权限预设 / 沙箱 / 审批策略**：委派时由父会话快照继承，定义文件无法设置。Auto/Full 父级让子级获得相同权限预设；Read Only / Workspace Write 父级保留继承的沙箱覆盖与 `approval: never`。想要"只读子代理"只能靠 `[tools] deny` 近似（同时从提示词移除并拒绝执行），并且要一并 deny shell 类工具。
-- **provider 实例级设置**：如 `claude-code` 的 `permissionMode`、`acp` 的 `command/args/env`、`dsh-sdk` 的 `profile/dshHome` —— 这些属于 profile 里的插件行；定义只能按名字选择已注册的 provider。
-- **子代理工作目录**：继承父会话 cwd（`acp`/`dsh-sdk` 的 provider 行可整体覆盖）。
-- **是否继承父对话**：由 `spawn`（不继承）或 `fork`（继承已完成轮次前缀）决定。
-- **`run_in_background`**：本插件未暴露该参数；后台语义由定义的 `mode` 决定。
+- **权限预设 / 沙箱 / 审批策略**：由父会话快照继承，"只读子代理"只能用 `[tools] deny` 近似（并一并 deny shell 类工具）。
+- **provider 实例级设置**（如 `claude-code` 的 `permissionMode`、`acp` 的 `command/args/env`）：属于 profile 里的插件行，定义只能按名选择已注册的 provider。
+- **子代理工作目录**：继承父会话 cwd。
+- **新增工具**：`[tools]` 只能做减法。
+- **`run_in_background`**：未暴露；后台语义由 `mode` 决定。
+
+完整清单与原因见 [技术文档 · 不支持的能力](guide/technical.md#11-明确不支持的能力)。
 
 ## 失败可见性
 
-1. `ctx.logger.warn` 每个失败文件一行：`dsh-agents-toml: <file>: <reason>`。
-2. 工具描述里列出不可用定义（`reportFailuresToModel: false` 可关闭）。
-3. 模型若调用了失效的 `agent_type`，工具返回明确原因；若名字压根不存在，返回当前可用的名字列表。
-4. 任何定义问题都不会导致 Agent 创建失败。
+1. 日志：每个失败文件一行 `dsh-agents-toml: <file>: <原因>`（同一文件 + 原因只报一次）。
+2. 工具描述：列出不可用定义及原因（可关，见设置项）。
+3. 调用报错：名字不存在 → 列出当前可用名字；命中失败定义 → 给出原因与文件路径。
+4. 任何定义问题**都不会导致 Agent 创建失败**。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [`guide/technical.md`](guide/technical.md) | 技术文档：实现结构、插件行配置语义、解析与校验规则、能力位规则与报错、生命周期、热更新、客户端半边、真机验证结论、开发与测试、限制 |
+| [`guide/settings-explained.md`](guide/settings-explained.md) | 四个设置项的场景讲解 |
+| [`guide/explorer.toml`](guide/explorer.toml) / [`guide/reviewer.toml`](guide/reviewer.toml) | 逐键注释的完整示例 |
 
 ## 开发与测试
 
 ```sh
 npm install
-npm run check     # tsc 类型检查 + node --test 测试
-npm run build     # 产出 lib/*.js 与 lib/types/*.d.ts
+npm run check     # 两个编译面类型检查 + 文档链接检查 + 单测
+npm run build     # 产出 lib/*.js、lib/types/*.d.ts 与 lib/client.js
 ```
 
-测试完全不依赖 DSH 安装，也不读写真实 `$DSH_HOME`：`ctx` 是假实现，定义目录是内存文件系统或注入的 `homeDir`，因此不会碰到你机器上的 `~/.dsh`。
-
-测试已覆盖：TOML 解析与全部校验分支、目录优先级与重名、能力位矩阵、请求映射（含 continuable 的字段裁剪）、工具 schema 与入参校验、委派成功/失败/取消路径、按 Agent 安装与释放、watcher 重装、卸载清理。
-
-## 隔离式端到端验证（尚未执行）
-
-真机验证请使用一次性 Harness home 与一次性 profile，别碰你正在使用的 `web` profile：
-
-```powershell
-$env:DSH_HOME        = 'D:\temp\dsh-plugin-e2e\home'
-$env:DSH_AGENTS_HOME = 'D:\temp\dsh-plugin-e2e\agents'
-dsh --profile plugin-dev --from-default-profile web
-dsh plugin --profile plugin-dev add D:\Work\Codes\Others\dsh-agents-toml
-dsh --profile plugin-dev --dump-config | Select-String dsh-agents-toml
-```
-
-## 已知限制
-
-- 只暴露一个工具、一个 `agent_type` 参数；不同定义的能力差异不会体现在 schema 上，靠调用时的明确报错兜底。
-- 工具 schema 里的 `agent_type.enum` 在 Agent 组装时生成；文件变更后由 watcher 重装刷新。关闭 `watchDefinitions` 时，新名字要等该 Agent 下次创建才会出现在 enum 里（直接调用新名字仍会即时生效）。
-- 不提供设置页开关；项目级信任通过插件行的 `trustProjectAgents` 显式开启（默认关闭）。
-- 委派是同步等待结果的（`one-shot`）或立即返回子代理 id（`continuable`），不接入 `job_*` 后台任务面。
+测试完全不依赖 DSH 安装，也不读写真实 `$DSH_HOME`。细节与覆盖范围见 [技术文档 · 测试](guide/technical.md#13-测试与构建)。

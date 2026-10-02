@@ -1,0 +1,56 @@
+# 示例 2：只读代码审查子代理
+#
+# 演示：mode = "one-shot"（等它跑完并拿回结果）+ persona + 结构化返回 + 禁止写文件的工具限制。
+#
+# 用法：复制到 $DSH_HOME/agents/ 或已信任的 <项目根>/.dsh/agents/，下一次委派即可用
+#      agent_type = "reviewer"（无需重启）。
+#
+# 注释约定：
+#   [必填] 缺少会让该定义在解析期失败（其余定义不受影响）
+#   [可选] 省略时按括号里的默认行为执行
+# 每个键的类型、可选项与能力要求见 README 的「TOML 字段参考」。
+
+# [必填] agent_type 的取值；须匹配 [A-Za-z0-9][A-Za-z0-9_-]{0,63}
+name = "reviewer"
+
+# [必填] 非空。模型据此决定何时选它
+description = "只读代码审查：只报告问题与依据，不修改任何文件，不再向下委派。"
+
+# [可选] 默认 true。false 时不会出现在 agent_type 列表里，显式调用报 "is disabled"
+enabled = true
+
+# [可选] 默认 "one-shot"。one-shot = 父会话等待子代理完成后拿回最终文本；
+#        continuable 相反（立即返回子代理 id）。本例要"当场拿到审查结论"，所以用默认值。
+mode = "one-shot"
+
+# [可选] 默认取插件行 defaultProvider（默认 spawn）。spawn 不继承父对话上下文，
+#        因此 prompt 必须自包含（本插件的工具描述也这样提示模型）。
+provider = "spawn"
+
+# [可选] 只作用于该子代理的系统提示补充，会遮蔽部署 persona（需要 provider 能力 persona）
+persona = """
+你是资深代码审查者。只报告问题与依据，不修改文件；需要改动时在结论里说明建议。
+"""
+
+# [可选] 省略则取 Host 的 subagent.maxDepth（通常为 1）。
+#        1 = 允许本次委派，但该子代理不能再往下委派（它的子代理深度会是 2 > 1）。
+max_depth = 1
+
+# [可选] 结构化返回：父会话收到的是符合该 schema 的结果（需要 provider 能力 outputSchema，
+#        且只能配 mode = "one-shot"）。删掉本行则返回子代理的最终文本。
+output_schema = { type = "object", properties = { summary = { type = "string" }, findings = { type = "array", items = { type = "string" } } }, required = ["summary"] }
+
+# [可选] 从子代理的提示词里移除并拒绝执行这些工具（只能做减法，需要 provider 能力 toolFilter）。
+#        `write`/`edit` 在每个随发行版提供的组合里都存在，所以这两个名字可移植；
+#        shell 工具的名字因部署而异（Windows headless 是 pwsh，web 还可能有 bash/terminal），
+#        写错会在委派时报错并列出已知工具名 —— 因此 shell 的 deny 行默认注释，按你的部署取消注释。
+[tools]
+deny = ["write", "edit"]
+# deny = ["write", "edit", "pwsh"]
+
+# --- 本例未启用的可选键（按需取消注释，注意括号里的约束）---
+# 把审查也放到另一个模型上（需要 provider 能力 agentOptions：spawn / fork / dsh-sdk）：
+# llm_provider = "deepseek-official"
+# model = "deepseek-v4-flash"
+# reasoning_effort = "high"
+# max_tokens = 8192

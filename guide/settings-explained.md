@@ -91,6 +91,7 @@
 
 ## 相关文档
 
-- 安装与开启步骤：项目根 [`README.md`](../README.md)
-- 完整功能与限制：[`docs/FEATURES.md`](../docs/FEATURES.md)
-- 定义文件字段：[`docs/FEATURES.md`](../docs/FEATURES.md) 第 4 节
+- 安装与开启步骤：[`README.md`](../README.md)
+- 技术文档（机制、校验规则、能力位、限制）：[`technical.md`](technical.md)
+- 定义文件字段参考：[`README.md` · TOML 字段参考](../README.md#toml-字段参考)
+- 逐键注释的完整示例：[`explorer.toml`](explorer.toml)、[`reviewer.toml`](reviewer.toml)
