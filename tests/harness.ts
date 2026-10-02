@@ -10,6 +10,8 @@ import type { DiscoveryIo } from '../src/discovery.ts'
 import type {
   AgentLike,
   ContextLike,
+  SkillProviderLike,
+  SkillRegistryLike,
   SubagentCapabilities,
   SubagentProvider,
   SubagentResult,
@@ -119,13 +121,21 @@ export interface RegisteredTool {
 export interface FakeContext {
   readonly ctx: ContextLike
   readonly tools: RegisteredTool[]
-  readonly logs: { readonly level: 'warn' | 'info'; readonly message: string }[]
+  readonly logs: { readonly level: 'warn' | 'info' | 'error'; readonly message: string }[]
   readonly fibers: { readonly services: readonly string[]; disposed: boolean }[]
   readonly cleanups: (() => void)[]
+  /** Providers registered through the fake skills service. */
+  readonly skills: FakeSkillRegistration[]
   /** Agents the fake registry reports; add to it before the plugin activates. */
   readonly registry: AgentLike[]
   emitCreated(agent: AgentLike): Promise<void>
   emitDisposed(agent: AgentLike): void
+}
+
+/** One provider registration observed on the fake skills service. */
+export interface FakeSkillRegistration {
+  readonly provider: SkillProviderLike
+  disposed: boolean
 }
 
 /**
@@ -139,8 +149,17 @@ export function createFakeContext(subagents: SubagentService): FakeContext {
   const fibers: FakeContext['fibers'][number][] = []
   const cleanups: (() => void)[] = []
   const registry: AgentLike[] = []
+  const skillRegistrations: FakeSkillRegistration[] = []
   type Payload = { agent: AgentLike }
   const listeners = new Map<'agent/created' | 'agent/disposed', ((payload: Payload) => unknown)[]>()
+
+  const skills: SkillRegistryLike = {
+    registerProvider(create) {
+      const entry: FakeSkillRegistration = { provider: create(undefined), disposed: false }
+      skillRegistrations.push(entry)
+      return () => { entry.disposed = true }
+    },
+  }
 
   const ctx: ContextLike = {
     tools: {
@@ -154,6 +173,7 @@ export function createFakeContext(subagents: SubagentService): FakeContext {
     logger: {
       warn: (...args) => { logs.push({ level: 'warn', message: args.map(String).join(' ') }) },
       info: (...args) => { logs.push({ level: 'info', message: args.map(String).join(' ') }) },
+      error: (...args) => { logs.push({ level: 'error', message: args.map(String).join(' ') }) },
     },
     on(event, listener) {
       const list = listeners.get(event) ?? []
@@ -171,7 +191,9 @@ export function createFakeContext(subagents: SubagentService): FakeContext {
       const first = tools.length
       const fiber = { services, disposed: false }
       fibers.push(fiber)
-      callback(ctx)
+      // Only a scope that asked for `skills` carries the service, mirroring the
+      // real context where the property appears through the injected fiber.
+      callback(services.includes('skills') ? { ...ctx, skills } : ctx)
       const owned = tools.slice(first)
       return {
         dispose() {
@@ -192,6 +214,7 @@ export function createFakeContext(subagents: SubagentService): FakeContext {
     logs,
     fibers,
     cleanups,
+    skills: skillRegistrations,
     registry,
     async emitCreated(agent) {
       for (const listener of [...listeners.get('agent/created') ?? []]) await listener({ agent })

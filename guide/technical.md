@@ -32,6 +32,7 @@
 | 只读子代理 | ⚠️ 近似 | 只能用 `[tools] deny` 限制工具；**权限预设/沙箱/审批不可按定义设置**（见第 11 节） |
 | 失败可视 | ✅ | 日志 warn + 工具描述列出不可用定义 + 调用时明确报错 |
 | 插件页配置 | ✅ | 挂在**本插件自己的插件页**上（插件 → 已安装 → dsh-agents-toml），改 4 个 volatile 字段，保存即生效（见 §3） |
+| 内置 Skill | ✅ | 包内 `assets/skill/SKILL.md` 经 `ctx.skills` 发布，模型在技能目录里看到 `dsh-agents-toml` 并据此代写定义（见 §17） |
 
 ## 3. 插件行配置
 
@@ -289,3 +290,24 @@ dsh --profile plugin-dev --port 3099 --no-open     # 控制台会打印带 token
 ```
 
 验证要点：`--dump-config` 里出现插件行与 `config`；启动后新任务里能看到该工具与 `agent_type` 列表；真机委派后检查会话日志（`sessions/.../session.v4.jsonl.zstd`，多帧 zstd）里的 `tool/call`、`subagent/catalog` 与子会话文件。设置项的写入可以直接观察 profile 的 `cordis.patch.yml` 是否被更新。
+
+## 17. 内置 Skill
+
+包内 `assets/skill/SKILL.md` 是**模型可见**的定义撰写指南（英文，与工具描述一致），让用户在装完插件后用自然语言就能得到一份合法定义。
+
+**注册方式**（`src/skill.ts` + `src/index.ts` 的 `contributeSkill`）：提供方实现 `ctx.skills.registerProvider((control) => provider)`，候选形状为
+
+```ts
+{ name: 'dsh-agents-toml', description, whenToUse?, invocation: { modelInvocable: true, userInvocable: true },
+  source: 'bundled', provider: 'dsh-agents-toml', resourceBase: { kind: 'directory', path: <包根> }, rank: 600 }
+```
+
+- `rank: 600` 与上游 `BUNDLED_SKILL_RANK` 一致：包内技能排在本地技能之后，重名时由本地技能胜出。
+- `resourceBase` 指向**包根**，因此技能正文里的 `guide/technical.md`、`guide/*.toml` 相对路径可直接被模型读取，不必在包内再复制一份模板。
+- 与 `src/host.ts` 的既有立场一致，这里同样**不 import `@deepseek-ai/dsh-skill`**：类型是结构性的，rank 是协议常量。
+
+**为什么用可选子 fiber**：`skills` 不在插件的 `inject` 导出里——否则没有技能服务的组合会让整行无法激活，委派功能一起失效。`contributeSkill` 用 `ctx.inject(['skills'], …)` 单独等待该服务，父行不受影响。
+
+**降级策略**：资产缺失或 frontmatter 不合法时记一条 `error` 日志并**不注册**技能，插件其余功能照常。资产里的 `name` 若与注册名不一致也按失败处理，避免"目录里显示的名字"与"文件自称的名字"漂移。
+
+**发现与刷新**：`tool-skill` 把技能目录作为持久会话目录注入（`<available_skills>` 块），并订阅 `skills/change`——因此注册发生在**运行中的会话**里也会推送一份替换目录，无需重启会话。

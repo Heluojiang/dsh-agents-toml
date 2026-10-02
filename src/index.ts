@@ -12,6 +12,7 @@ import Schema from '@deepseek-ai/schemastery'
 
 import type { ContextLike } from './host.ts'
 import { createPlugin } from './plugin.ts'
+import { createSkillProvider, readSkillAsset, DEFAULT_SKILL_ASSETS, SKILL_NAME, type SkillAssets } from './skill.ts'
 
 /** Plugin row name. */
 export const name = 'dsh-agents-toml'
@@ -67,6 +68,32 @@ export const Config = Schema.object({
 })
 
 /**
+ * Publish the packaged authoring guide through the skills service.
+ *
+ * `skills` is deliberately not a declared injection: a composition without the
+ * skill registry must still get delegation, so this waits on the service in a
+ * child fiber of its own. A missing or malformed asset is reported and skipped
+ * for the same reason — a packaging problem must not take the plugin down.
+ * @param ctx - the Harness context.
+ * @param assets - asset locations; the packaged ones unless a test supplies its own.
+ */
+export function contributeSkill(ctx: ContextLike, assets: SkillAssets = DEFAULT_SKILL_ASSETS): void {
+  ctx.inject(['skills'], (scoped) => {
+    const skills = scoped.skills
+    if (skills === undefined) return
+    let provider
+    try {
+      provider = createSkillProvider(assets, readSkillAsset(assets))
+    } catch (error) {
+      ctx.logger.error(`dsh-agents-toml: skill "${SKILL_NAME}" is unavailable: ${String(error)}`)
+      return
+    }
+    const dispose = skills.registerProvider(() => provider)
+    ctx.effect?.(() => () => { dispose() })
+  })
+}
+
+/**
  * Mount the plugin.
  * @param ctx - the Harness context.
  * @param config - validated row configuration.
@@ -81,4 +108,5 @@ export function apply(ctx: ContextLike, config: Config): void {
     reportFailuresToModel: () => config.reportFailuresToModel.get(),
     userAgentsDir: config.userAgentsDir.get(),
   })
+  contributeSkill(ctx)
 }

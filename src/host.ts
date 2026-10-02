@@ -121,6 +121,62 @@ export interface FiberLike {
   dispose(): Promise<void> | void
 }
 
+/** Invocation controls a skill advertises to discovery consumers. */
+export interface SkillInvocationPolicy {
+  /** Whether the model-facing `skill` tool may load this skill. */
+  readonly modelInvocable: boolean
+  /** Whether human-facing command catalogs include this skill. */
+  readonly userInvocable: boolean
+}
+
+/** Discovery source recorded on a candidate; `bundled` marks a packaged skill. */
+export type SkillSourceLike =
+  | 'project-dsh' | 'project-agents' | 'runtime' | 'user-dsh' | 'user-agents' | 'custom' | 'bundled'
+  | (string & {})
+
+/** Provider-to-registry skill entry: summary fields plus the provider's own handle. */
+export interface SkillCandidateLike {
+  readonly name: string
+  readonly description: string
+  readonly whenToUse?: string
+  readonly invocation: SkillInvocationPolicy
+  readonly source: SkillSourceLike
+  /** Must equal the registering provider's name. */
+  readonly provider: string
+  /** Base relative references in the body resolve against. */
+  readonly resourceBase?: { readonly kind: 'directory'; readonly path: string }
+  /** Lower ranks win duplicate names within one registry layer. */
+  readonly rank: number
+  /** Opaque provider state handed back to `get`. */
+  readonly locator: unknown
+}
+
+/** Complete skill body returned by a provider's `get`. */
+export interface SkillDefinitionLike extends Omit<SkillCandidateLike, 'rank' | 'locator'> {
+  readonly content: string
+}
+
+/** One source of skills. */
+export interface SkillProviderLike {
+  /** Unique provider name inside the registry layer. */
+  readonly name: string
+  list(options: { readonly cwd?: string | undefined; readonly signal: AbortSignal }): Promise<readonly SkillCandidateLike[]>
+  get(
+    candidate: SkillCandidateLike,
+    options: { readonly cwd?: string | undefined; readonly signal: AbortSignal },
+  ): Promise<SkillDefinitionLike | undefined>
+}
+
+/** `ctx.skills`: the provider registry skills are contributed to. */
+export interface SkillRegistryLike {
+  /**
+   * Register one provider.
+   * @param create - factory receiving the registration-scoped control.
+   * @returns the disposer removing the provider.
+   */
+  registerProvider(create: (control: unknown) => SkillProviderLike): () => void
+}
+
 /** The Agent this plugin delegates from. */
 export interface AgentLike {
   readonly session: { readonly header: { readonly cwd?: string | undefined } }
@@ -131,7 +187,11 @@ export interface AgentLike {
 export interface ContextLike {
   readonly tools: { register(definition: ToolDefinition): () => void }
   readonly subagents: SubagentService
-  readonly logger: { warn(...args: readonly unknown[]): void; info(...args: readonly unknown[]): void }
+  readonly logger: {
+    warn(...args: readonly unknown[]): void
+    info(...args: readonly unknown[]): void
+    error(...args: readonly unknown[]): void
+  }
   on(event: 'agent/created', listener: (payload: { agent: AgentLike }) => void | Promise<void>): () => void
   on(event: 'agent/disposed', listener: (payload: { agent: AgentLike }) => void): () => void
   inject(services: readonly string[], callback: (scoped: ContextLike) => void): FiberLike
@@ -139,6 +199,8 @@ export interface ContextLike {
   get?(name: string): unknown
   /** Absent on foreign contexts; used to close watchers when the plugin unloads. */
   effect?(callback: () => (() => void) | void): void
+  /** Present on a context that injected `skills`; the optional skill contribution. */
+  readonly skills?: SkillRegistryLike
 }
 
 /** The Agent registry, read to catch Agents created before this plugin activated. */
