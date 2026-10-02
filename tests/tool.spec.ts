@@ -91,10 +91,10 @@ describe('tool schema', () => {
 
   it('warns that a continuable subagent answers later than this call', () => {
     const oneShot = bench([definition()]).tool
-    assert.doesNotMatch(oneShot.description, /start in the background/)
+    assert.doesNotMatch(oneShot.description, /Background subagents/)
 
     const mixed = bench([definition(), definition({ name: 'explorer', mode: 'continuable' })]).tool
-    assert.match(mixed.description, /explorer instead start in the background and return only a child id/)
+    assert.match(mixed.description, /Background subagents \(explorer\) return only a child id/)
     assert.match(mixed.description, /their answer arrives later, not with this call\./)
   })
 

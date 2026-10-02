@@ -96,7 +96,7 @@ function buildDescription(options: DelegationToolOptions): string {
     // "returns only its result" above would promise an answer this call never
     // carries.
     parts.push(
-      `${options.installedContinuable.join(', ')} instead start in the background and return only a child id; `
+      `Background subagents (${options.installedContinuable.join(', ')}) return only a child id; `
       + 'their answer arrives later, not with this call.',
     )
   }
