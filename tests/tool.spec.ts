@@ -95,7 +95,7 @@ describe('tool schema', () => {
 
     const mixed = bench([definition(), definition({ name: 'explorer', mode: 'continuable' })]).tool
     assert.match(mixed.description, /Background subagents \(explorer\) return only a child id/)
-    assert.match(mixed.description, /their answer arrives later, not with this call\./)
+    assert.match(mixed.description, /the child's answer does not come back with this call\./)
   })
 
   it('renders the canonical text value', () => {

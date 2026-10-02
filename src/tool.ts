@@ -97,7 +97,7 @@ function buildDescription(options: DelegationToolOptions): string {
     // carries.
     parts.push(
       `Background subagents (${options.installedContinuable.join(', ')}) return only a child id; `
-      + 'their answer arrives later, not with this call.',
+      + 'the child\'s answer does not come back with this call.',
     )
   }
   if (options.installedNames.length > 0) parts.push(`Configured subagents: ${options.installedNames.join(', ')}.`)

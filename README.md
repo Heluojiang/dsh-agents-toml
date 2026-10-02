@@ -7,7 +7,7 @@
 - **失败互不牵连**：某个定义写错或用了当前 provider 不支持的能力时，只有该定义不可用（日志 + 工具描述说明原因），其余照常，且**绝不会导致 Agent 创建失败**。
 - **热生效**：定义文件在每次委派时重新读取；目录 watcher 让模型看到的 `agent_type` 列表同步刷新。
 
-**文档导航**：[安装](#安装) · [插件设置项](#插件设置项) · [用自然语言创建定义](#用自然语言创建定义内置-skill) · [插件行配置](#插件行配置通常无需手改) · [TOML 字段参考](#toml-字段参考) · [示例定义](guide/explorer.toml) · [技术文档](guide/technical.md) · [开关场景讲解](guide/settings-explained.md)
+**文档导航**：[安装](#安装) · [插件设置项](#插件设置项) · [用自然语言创建定义](#用自然语言创建定义内置-skill) · [插件行配置](#插件行配置通常无需手改) · [TOML 字段参考](#toml-字段参考) · [常见误解](#常见误解) · [示例定义](guide/explorer.toml) · [技术文档](guide/technical.md) · [开关场景讲解](guide/settings-explained.md)
 
 ## 安装
 
@@ -228,7 +228,7 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 | `name` | **是** | string，`[A-Za-z0-9][A-Za-z0-9_-]{0,63}` | — | `agent_type` 的取值。**同一目录内重名 → 两个定义都失败**；跨目录同名时项目覆盖用户 |
 | `description` | **是** | 非空 string | — | 模型选择该子代理的依据 |
 | `enabled` | 否 | `true` / `false` | `true` | `false`：不进 `agent_type` 列表与工具描述；显式调用报 `subagent "x" is disabled in <file>` |
-| `mode` | 否 | `"one-shot"` / `"continuable"` | `"one-shot"` | `one-shot`：等待子代理完成并返回文本；`continuable`：**立即**返回 `started subagent <childId>`（初始 prompt 已入队，子代理的答复稍后另行送达，**不是**这次工具调用的返回值）。续聊见 [继续一个 continuable 子代理](#继续一个-continuable-子代理依赖官方控制工具) |
+| `mode` | 否 | `"one-shot"` / `"continuable"` | `"one-shot"` | `one-shot`：等待子代理完成并返回文本；`continuable`：**立即**返回 `started subagent <childId>`（初始 prompt 入队被接受即返回，**没有自动回传** —— 见 [常见误解](#常见误解) 与 [继续一个 continuable 子代理](#继续一个-continuable-子代理依赖官方控制工具)） |
 | `provider` | 否 | 已注册的传输名（随 profile 而定，如 `spawn`/`fork`/`acp`/`codex`/`claude-code`/`dsh-sdk`） | 插件行 `defaultProvider`（`spawn`） | 未注册时调用报错并列出已注册的 provider 名 |
 | `llm_provider` | 否 | string | 不覆盖（继承父级路由） | 子代理的 LLM 路由 provider；需要 `agentOptions` |
 | `model` | 否 | string | 同上 | 子代理使用的模型；需要 `agentOptions` |
@@ -262,8 +262,9 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 
 `mode = "continuable"` 是 **Harness 自带能力**（`ctx.subagents.startContinuable()`），本插件只把 TOML 字段映射过去，不自己实现续聊。于是有两条必须分清的事实：
 
-1. **工具返回值只是"已启动"**：`started subagent <childId>`（与官方 `subagent` 工具在 continuable 下的措辞逐字相同）。初始 prompt 在**入队被接受**时就返回，子代理的答复稍后经父会话 inbox 送达，不是这次调用的结果。
-2. **续聊要靠官方的 `dsh-tool-subagent-control`**，不是任意叫 `send_message` 的工具：
+1. **工具返回值只是"已启动"**：`started subagent <childId>`（与官方 `subagent` 工具在 continuable 下的措辞逐字相同）。初始 prompt 在**入队被接受**时就返回，这就是这次调用的全部返回值。
+2. **没有隐式回传**：子代理那一轮跑完，**既不会把内容发给父代理，也不会唤醒父代理**（官方设计：`The base lifecycle has no implicit report behavior`；它提到的可选 report 包在当前发行里并不存在）。要拿到产出只能靠消息 —— 要么子代理自己 `send_message(agent_id = 父)`，要么父代理 `send_message(agent_id = 子)` 去问、它再回。产出本身始终留在它自己的会话里。
+3. **续聊要靠官方的 `dsh-tool-subagent-control`**，不是任意叫 `send_message` 的工具：
 
 | 工具 | 参数 | 语义 |
 |---|---|---|
@@ -274,6 +275,17 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 
 - **`one-shot` 子代理永远无法续聊**；兄弟、隔代祖先、自身也都不被授权。
 - **启用 Agent Teams 后这条路会被它替换掉。** `dsh-experimental-agent-team-profile` 会禁用 `tool-subagent-control`（连同 `tool-subagent`、`tool-subagent-fork`、`list-agents`），改挂 `tool-agent-team`：那个 `send_message` 的参数是 **`target`**（队友），对子代理 id 只会报 `active teammate "<id>" not found`。此时 `agent_type` 委派本身照常可用，只是父代理无法再续聊该子代理 —— 这是该实验性 profile 的既定取舍，不是本插件的问题。
+
+### 常见误解
+
+**误解 1：`mode = "continuable"` 会等子代理跑完，答复稍后自动送达。**
+实际 `started subagent <childId>` 就是这次工具调用的全部返回值（官方语义：初始 prompt 入队被接受即 resolve），而且**没有任何自动回传**：子代理那一轮结束时既不会把内容发给父代理，也不会唤醒父代理。要拿到产出，只能是消息往返 —— 子代理自己 `send_message(agent_id = 直接父代理)`，或父代理 `send_message(agent_id = 直接子代理)` 去问、它再回；两条路都要求官方控制工具在这个组合里存在。产出始终留在子代理自己的会话中。
+
+**误解 2：任何叫 `send_message` 的工具都能继续子代理。**
+只有官方 `dsh-tool-subagent-control` 的那个可以：参数是 **`agent_id`**，只授权**直接父子**之间，返回的是**送达确认**而不是答复。Agent Teams 的同名工具参数是 **`target`**、寻址的是**队友**：拿子代理 id 去调只会得到 `active teammate "<id>" not found`。
+
+**误解 3：装了 Agent Teams 就不能用本插件了。**
+不是。本插件的 `agent_type` 委派直接调用 `ctx.subagents.start()` / `startContinuable()`，与官方 `tool-subagent*` 无关，因此与 Agent Teams 正常共存（实测同一会话里 `subagent_custom` 与团队工具同时可见）。被 Agent Teams 替换掉的只有官方直连委派那一路：父代理续聊 continuable 子代理的控制工具、`list_agents`（变成列队友）、以及官方 `subagent` / `subagent_fork` 工具本身。
 
 ### `max_depth` 的语义
 

@@ -20,7 +20,8 @@ description = "代码库探索与定位：快速找文件、找符号、回答�
 enabled = true
 
 # [可选] 默认 "one-shot"。continuable = 立即返回 `started subagent <childId>`
-#        （入队被接受即返回，子代理的答复稍后另行送达，不是这次调用的返回值）。
+#        （入队被接受即返回，这就是本次调用的全部返回值；**没有自动回传**：
+#        子代理跑完不会通知父代理，取产出要靠 send_message 消息往返）。
 #        续聊要用官方 `dsh-tool-subagent-control` 的 send_message（参数是 agent_id，
 #        只授权直接父子之间）；若该 profile 启用了 Agent Teams，它会禁用这个控制工具，
 #        换成按 target 寻址队友的同名工具，此时无法续聊本子代理。
