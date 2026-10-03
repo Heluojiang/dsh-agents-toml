@@ -62,11 +62,12 @@ function bench(
     subagents: fake.service,
     hostDepth: options.hostDepth ?? (() => fake.hostDepth()),
     load: () => Promise.resolve(discovery(definitions, options.failures ?? [])),
-    installedNames: definitions.filter(entry => entry.enabled).map(entry => entry.name),
-    installedContinuable: definitions
-      .filter(entry => entry.enabled && entry.mode === 'continuable')
-      .map(entry => entry.name),
-    installedInheriting: options.inheriting ?? [],
+    installed: definitions.filter(entry => entry.enabled).map(entry => ({
+      name: entry.name,
+      description: entry.description,
+      continuable: entry.mode === 'continuable',
+      inherits: (options.inheriting ?? []).includes(entry.name),
+    })),
     installedFailures: options.failures ?? [],
   })
   return { tool, started: fake.started, continuable: fake.continuable, parent, exec: { agent: parent, signal: controller.signal } }
@@ -85,6 +86,25 @@ describe('tool schema', () => {
     assert.deepEqual(parameters.properties.agent_type.enum, ['reviewer', 'explorer'])
     assert.deepEqual(parameters.required, ['agent_type', 'description', 'prompt'])
     assert.match(tool.description, /Configured subagents: reviewer, explorer\./)
+  })
+
+  it('hints each agent_type with the definition it names', () => {
+    // The definition's own `description` is its routing hint, and a JSON Schema
+    // enum carries bare names, so the hint has to reach the model here.
+    const { tool } = bench([
+      definition(),
+      definition({ name: 'explorer', description: 'Cross-module call chains.' }),
+    ])
+    const parameters = tool.parameters as { properties: { agent_type: { description: string } } }
+    assert.match(parameters.properties.agent_type.description, /reviewer — Reviews code\./)
+    assert.match(parameters.properties.agent_type.description, /explorer — Cross-module call chains\./)
+  })
+
+  it('leaves the agent_type hint bare when nothing is installed', () => {
+    const { tool } = bench([])
+    const parameters = tool.parameters as { properties: { agent_type: { description: string; enum?: string[] } } }
+    assert.equal(parameters.properties.agent_type.description, 'Name of the configured subagent to delegate to.')
+    assert.equal(parameters.properties.agent_type.enum, undefined)
   })
 
   it('lists unavailable definitions only when asked to', () => {

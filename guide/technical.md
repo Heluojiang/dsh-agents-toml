@@ -40,10 +40,10 @@
 
 | 键 | 默认值 | 读取方式 | 语义 |
 |---|---|---|---|
-| `trustProjectAgents` | `false` | 每次发现定义时读取 | 是否让 `<projectRoot>/<projectAgentsDir>` 参与发现 |
-| `toolName` | `subagent_custom` | 每次安装工具时读取 | 注册到 `ctx.tools.register` 的工具名 |
-| `watchDefinitions` | `true` | 每次打开目录监听前读取 | 关闭后不再开 `fs.watch`，`agent_type` 列表停止自动刷新 |
-| `reportFailuresToModel` | `true` | 每次安装工具时读取 | 是否把失败定义写进工具描述 |
+| `trustProjectAgents` | `false` | 每次发现定义时读取；写入时立即触发一次重装 | 是否让 `<projectRoot>/<projectAgentsDir>` 参与发现 |
+| `toolName` | `subagent_custom` | 每次安装工具时读取；写入时立即触发一次重装 | 注册到 `ctx.tools.register` 的工具名 |
+| `watchDefinitions` | `true` | 每次打开目录监听前读取；写入时立即触发一次重装 | 关闭后不再开 `fs.watch`，`agent_type` 列表停止自动刷新 |
+| `reportFailuresToModel` | `true` | 每次安装工具时读取；写入时立即触发一次重装 | 是否把失败定义写进工具描述 |
 | `defaultProvider` | `spawn` | 每次调用时读取 | 定义未写 `provider` 时使用的传输名 |
 | `projectAgentsDir` | `.dsh/agents` | 每次发现定义时读取 | 项目根下的相对目录 |
 | `userAgentsDir` | 未设置 | 每次发现定义时读取 | 覆盖用户级目录（绝对路径） |
@@ -59,7 +59,7 @@
 
 | 路径 | 机制 | 结果 |
 |---|---|---|
-| 插件页设置项 | 写入 profile 的 Cordis 补丁 + 原地更新 volatile 引用 | 下一次委派即按新值执行；`agent_type` 列表在下一次安装时刷新 |
+| 插件页设置项 | 写入 profile 的 Cordis 补丁 + 原地更新 volatile 引用 + 发出 `loader/volatile-update` | 插件收到事件后对每个运行中 Agent 重跑发现与安装：工具名、`agent_type` 列表、工具描述当场更新，监听目录当场对齐 |
 | 手改 `cordis.patch.yml` | DSH 监听补丁文件并重载该行（开启 HMR 的 profile） | 同上，但需要一次重载 |
 | `--patch` 覆盖层 | 每次启动生效，不改 profile | 适合临时验证 |
 
@@ -117,11 +117,13 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
-| `agent_type` | string（枚举 = 当前可用定义名） | 选哪个子代理 |
+| `agent_type` | string（枚举 = 当前可用定义名；说明里逐条带 `<名> — <description>`） | 选哪个子代理 |
 | `description` | string | 3–5 词标签；同时作为子代理的 durable label |
 | `prompt` | string | 自包含任务说明（子代理默认在自己的上下文里工作；`fork` 这类继承父级已完成轮次的传输除外，工具描述会区分） |
 
 工具描述包含：用途说明 + 传输是否继承上下文的说明 + `Configured subagents: a, b.` + 可选的 continuable 提示与 `Unavailable definitions: name (原因).`。「是否继承上下文」由安装期读取 provider 的 `inheritsParentContext` 决定（provider 尚未注册时按不继承计），因此同一次安装里的两类传输不会被一句笼统的措辞覆盖。
+
+定义自己的 `description`（TOML 的必填键）**写进 `agent_type` 参数的说明**，形如 `Each is declared for a different job: reviewer — 独立只读审查… | explorer — …`：JSON Schema 的枚举只携带名字，模型要"按用途选值"就必须看到这句话，否则这个必填键对模型毫无作用。
 
 ### 5.2 调用语义
 
@@ -169,8 +171,8 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 | 变更 | 是否需要重启 |
 |---|---|
 | 增删改 `*.toml` | **不需要**：调用时重读；`watchDefinitions` 开启时枚举同步刷新（防抖 200ms） |
-| 关闭 `watchDefinitions` | **立即**关闭已打开的目录监听；此后新名字要等该 Agent 下次创建才进枚举，但直接调用新名字仍即时生效 |
-| 插件页设置项写入 | **不需要**：写入落到 profile 补丁。只改 volatile 字段时 Loader **不重挂该行**，而是原地更新引用并发出 `loader/volatile-update`，插件在该事件里重新对齐目录监听——因此 `watchDefinitions` 立即生效；`trustProjectAgents` 每次发现定义时读取（下一次委派即生效）；`toolName` 与 `reportFailuresToModel` 在下一次安装（新任务/新会话）时读取。改到非 volatile 字段（`defaultProvider` / `projectAgentsDir` / `userAgentsDir`）则会重挂该行 |
+| 关闭 `watchDefinitions` | **立即**关闭已打开的目录监听；关掉后新名字不再自动进枚举（要等保存设置或该 Agent 下次创建），但直接调用新名字仍即时生效 |
+| 插件页设置项写入 | **不需要**：写入落到 profile 补丁。只改 volatile 字段时 Loader **不重挂该行**，而是原地更新引用并发出 `loader/volatile-update`，插件在该事件里对每个运行中 Agent 重跑发现与安装——因此四项都立即生效：`trustProjectAgents` 改变的是枚举与监听集合，`toolName` 改变注册名，`reportFailuresToModel` 改变描述，`watchDefinitions` 改变监听。改到非 volatile 字段（`defaultProvider` / `projectAgentsDir` / `userAgentsDir`）则会重挂该行 |
 | 手改 `cordis.patch.yml` | 开启 HMR 的 profile 会重载该行；关闭 HMR 的 profile 需要重启 |
 | 安装/卸载插件 bundle | web profile（默认开 HMR）不需要重启；HMR 关闭的 profile 需要 |
 | 升级插件自身代码 | 已加载模块不热替换，建议重启；刷新浏览器会重新拉取 `lib/client.js` |

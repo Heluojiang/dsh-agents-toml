@@ -309,14 +309,75 @@ describe('createPlugin', () => {
     assert.equal(b.watches[0]?.closed, false)
 
     watching = false
-    b.fake.emitVolatileUpdate([['watchDefinitions']])
+    await b.fake.emitVolatileUpdate([['watchDefinitions']])
 
     assert.equal(b.watches[0]?.closed, true)
 
     watching = true
-    b.fake.emitVolatileUpdate([['watchDefinitions']])
+    await b.fake.emitVolatileUpdate([['watchDefinitions']])
     assert.equal(b.watches.length, 2)
     assert.equal(b.watches[1]?.closed, false)
+  })
+
+  it('re-installs a running Agent when the trust switch is turned on', async () => {
+    // The settings card is the only way to turn this switch on, and it edits the
+    // running row: without re-installing, a session that already has its tool
+    // would keep an enum without the project definitions until the next Agent is
+    // created — which in a GUI session may be never.
+    let trusted = false
+    const b = bench({ trustProjectAgents: () => trusted })
+    b.io.mkdir(USER_DIR)
+    b.io.mkdir(GIT_DIR)
+    b.io.mkdir(PROJECT_DIR)
+    b.io.write(join(USER_DIR, 'reviewer.toml'), definition('reviewer'))
+    b.io.write(join(PROJECT_DIR, 'explorer.toml'), definition('explorer'))
+    await created(b.fake)
+    assert.deepEqual(enumOf(b.fake.tools[0]!.definition), ['reviewer'])
+
+    trusted = true
+    await b.fake.emitVolatileUpdate([['trustProjectAgents']])
+
+    assert.equal(b.fake.tools.length, 2)
+    assert.equal(b.fake.tools[0]?.disposed, true)
+    assert.deepEqual(enumOf(b.fake.tools[1]!.definition), ['reviewer', 'explorer'])
+    // The project directory becomes watched, so a later edit reaches the model.
+    assert.deepEqual(b.watches.map(watch => watch.dir), [USER_DIR, PROJECT_DIR])
+  })
+
+  it('installs the tool when a settings write makes definitions available at all', async () => {
+    // The harder half of the same problem: with no user definitions and trust
+    // off, nothing is registered, so no watch exists that a file change could
+    // ever fire.
+    let trusted = false
+    const b = bench({ trustProjectAgents: () => trusted })
+    b.io.mkdir(GIT_DIR)
+    b.io.mkdir(PROJECT_DIR)
+    b.io.write(join(PROJECT_DIR, 'explorer.toml'), definition('explorer'))
+    await created(b.fake)
+    assert.equal(b.fake.tools.length, 0)
+
+    trusted = true
+    await b.fake.emitVolatileUpdate([['trustProjectAgents']])
+
+    assert.equal(b.fake.tools.length, 1)
+    assert.deepEqual(enumOf(b.fake.tools[0]!.definition), ['explorer'])
+    assert.deepEqual(b.watches.map(watch => watch.dir), [PROJECT_DIR])
+  })
+
+  it('renames a running Agent tool when the tool name setting is written', async () => {
+    let toolName = 'subagent_custom'
+    const b = bench({ toolName: () => toolName })
+    b.io.mkdir(USER_DIR)
+    b.io.write(join(USER_DIR, 'reviewer.toml'), definition('reviewer'))
+    await created(b.fake)
+    assert.equal(b.fake.tools[0]?.definition.name, 'subagent_custom')
+
+    toolName = 'delegate'
+    await b.fake.emitVolatileUpdate([['toolName']])
+
+    assert.equal(b.fake.tools.length, 2)
+    assert.equal(b.fake.tools[0]?.disposed, true)
+    assert.equal(b.fake.tools[1]?.definition.name, 'delegate')
   })
 
   it('leaves the watches alone when the write did not change what to watch', async () => {
@@ -324,8 +385,9 @@ describe('createPlugin', () => {
     b.io.mkdir(USER_DIR)
     b.io.write(join(USER_DIR, 'reviewer.toml'), definition('reviewer'))
     await created(b.fake)
+    assert.equal(b.watches.length, 1)
 
-    b.fake.emitVolatileUpdate([['toolName'], ['reportFailuresToModel']])
+    await b.fake.emitVolatileUpdate([['reportFailuresToModel']])
 
     assert.equal(b.watches.length, 1)
     assert.equal(b.watches[0]?.closed, false)

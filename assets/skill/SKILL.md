@@ -8,7 +8,7 @@ whenToUse: Use when the user asks for a named/reusable subagent, a specialist de
 
 This Harness runs the `dsh-agents-toml` plugin. It turns TOML files into named subagents that the model reaches through **one** delegation tool (default `subagent_custom`) whose `agent_type` argument selects the definition. Your job with this skill: turn a request in plain language into a valid definition file, then tell the user the exact `agent_type` to use.
 
-Definitions are read on every delegation, so a new file works on the next call — no restart.
+Definitions are read on every delegation, so a new file works on the next call — no restart. The `agent_type` list the model sees refreshes on a definition-file change or on any settings write, and the name you write in `description` is what the model reads when choosing.
 
 ## 1. Ask before writing
 
@@ -47,7 +47,7 @@ deny = ["write", "edit", "pwsh"]
 | Key | Required | Values / notes |
 |---|---|---|
 | `name` | yes | `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; kebab-case by convention |
-| `description` | yes | non-empty; the model's routing hint |
+| `description` | yes | non-empty; the model's routing hint, shown beside this name in the `agent_type` parameter description — write when to pick this role |
 | `enabled` | no | `false` hides it from the tool while keeping the file |
 | `mode` | no | `"one-shot"` (default) waits for the child and returns its text; `"continuable"` returns `started subagent <childId>` at once, and the child's **final text** arrives later as a settlement notice (see the pitfalls below) |
 | `provider` | no | a transport registered in this profile (`spawn`, `fork`, `acp`, `codex`, `claude-code`, `dsh-sdk`, …); default comes from the plugin row |
@@ -87,8 +87,8 @@ Mention the mode to the user when you finish: for `continuable`, say the result 
 After writing the file, tell the user:
 
 1. the definition name — that is the `agent_type` value to use;
-2. when it takes effect (the next delegation; the tool's list updates at the next tool install, i.e. a new task/session or a definition-file change);
-3. if you wrote into the project directory: that they must enable **信任项目级定义** in the plugin settings first;
+2. when it takes effect (the next delegation; the tool's list updates at the next tool install, i.e. a new task/session, a definition-file change, or a settings write);
+3. if you wrote into the project directory: that they must enable **信任项目级定义** in the plugin settings first — and that saving that switch applies to the running session immediately, with no restart;
 4. how to try it, e.g. *"delegate to `docs-writer` and ask it to document …"*;
 5. for `mode = "continuable"`: that the call returns a child id and the result arrives later as a settlement notice, and that the conclusion is whatever that child puts in its closing message.
 

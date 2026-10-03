@@ -9,7 +9,7 @@
  * proves each name the plugin depends on is still there.
  *
  * Usage:
- *   npm run check:harness                       # resolve @deepseek-ai/dsh
+ *   npm run check:harness                       # resolve @deepseek-ai/dsh, else beside node.exe
  *   DSH_SHAPE_ROOT=/path/to/node_modules npm run check:harness
  *
  * It is not part of `npm test`: the unit suite runs without a DSH installation
@@ -22,23 +22,54 @@ import { dirname, join } from 'node:path'
 
 const require = createRequire(import.meta.url)
 
-/** Locate the `@deepseek-ai` scope holding the installed packages. */
+/**
+ * Locate the `@deepseek-ai` scope holding the installed packages.
+ *
+ * Three sources, in order: the explicit `DSH_SHAPE_ROOT` override, a `dsh`
+ * package reachable from this checkout, and the node installation running this
+ * script (a global install sits beside `node.exe`). Nothing found is reported
+ * as its own failure: probing a nonexistent directory yields one drift per
+ * declaration, which reads like the Harness changed rather than like the
+ * Harness was never located.
+ * @returns the scope to read, or `undefined` when the Harness is not installed.
+ */
 function resolveScope() {
   const override = process.env['DSH_SHAPE_ROOT']
   if (override !== undefined && override.length > 0) return override
   try {
     return dirname(require.resolve('@deepseek-ai/dsh/package.json'))
   } catch {
-    // Not installed next to this checkout: fall back to the sibling scope a
-    // global install creates, then report the miss through the first entry.
-    return join(process.cwd(), 'node_modules', '@deepseek-ai', 'dsh')
+    // Not resolvable from here; fall through to the node installation.
   }
+  const besideNode = join(dirname(process.execPath), 'node_modules', '@deepseek-ai', 'dsh')
+  return existsSync(besideNode) ? besideNode : undefined
 }
 
 const scope = resolveScope()
-const base = existsSync(join(scope, 'node_modules', '@deepseek-ai'))
-  ? join(scope, 'node_modules', '@deepseek-ai')
-  : join(dirname(scope), '@deepseek-ai')
+
+/** The `@deepseek-ai` scope directory the requirements are read from. */
+function scopeDirOf(root) {
+  const nested = join(root, 'node_modules', '@deepseek-ai')
+  return existsSync(nested) ? nested : join(dirname(root), '@deepseek-ai')
+}
+
+if (scope === undefined) {
+  console.error(
+    'check:harness: no DeepSeek Harness installation found. Install it (`npm i -g @deepseek-ai/dsh`) '
+    + 'or point DSH_SHAPE_ROOT at the @deepseek-ai/dsh package directory.',
+  )
+  process.exit(1)
+}
+
+const base = scopeDirOf(scope)
+
+if (!existsSync(join(base, 'dsh-subagent'))) {
+  console.error(
+    `check:harness: ${base} holds no Harness packages. Point DSH_SHAPE_ROOT at the @deepseek-ai/dsh `
+    + 'package directory (the one whose node_modules/@deepseek-ai holds the subpackages).',
+  )
+  process.exit(1)
+}
 
 /**
  * One declaration the plugin relies on.

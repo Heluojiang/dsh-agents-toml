@@ -34,7 +34,7 @@ dsh plugin --profile web add @heluojiang/dsh-agents-toml
 2. **判断"是否发布成功"要看注册表，不要看网页。** npmjs.com 对不存在的包也会渲染一个页面，容易误判；权威判据是：
 
    ```sh
-   npm view @heluojiang/dsh-agents-toml version      # 成功时输出 0.2.1
+   npm view @heluojiang/dsh-agents-toml version      # 成功时输出最新已发布版本号
    curl -s -o /dev/null -w '%{http_code}\n' https://registry.npmjs.org/@heluojiang%2Fdsh-agents-toml   # 成功时 200
    ```
 
@@ -81,7 +81,7 @@ dsh web --patch ./dev.patch.yml
 |---|---|---|
 | 安装/卸载本插件 bundle | 不需要重启（DSH 监听 profile 的 `package.json` 与 patch 文件） | 需要重启 |
 | 新增/修改 `*.toml` 定义 | 不需要重启：每次委派都重读文件，**下一个模型请求**就能用新定义（监听开着时 `agent_type` 列表也在此时刷新） | 同左 |
-| 在**插件设置项**里改配置 | 不需要重启，但四个键的生效点不同，见下表 | 不适用（无 GUI） |
+| 在**插件设置项**里改配置 | 不需要重启：四个键保存后**立即**作用于运行中的会话，见下表 | 不适用（无 GUI） |
 | 手改 `cordis.patch.yml` | 不需要重启（补丁文件被监听，该行重载） | 需要重启 |
 | 升级本插件版本（含客户端半边） | Host 模块不热替换，建议重启；刷新浏览器会重新拉取 `lib/client.js` | 需要重启 |
 
@@ -89,14 +89,14 @@ dsh web --patch ./dev.patch.yml
 
 | 设置项 | 写入后什么时候生效 |
 |---|---|
-| 信任项目级定义 `trustProjectAgents` | 生效于**下一次委派**：每次发现定义时都会读取 |
+| 信任项目级定义 `trustProjectAgents` | **立即**：重新安装每个运行中 Agent 的工具，`agent_type` 列表当场更新，新出现的目录也当场开始监听 |
 | 监听定义目录 `watchDefinitions` | 立即：关掉会**关闭已打开的目录监听**，打开会马上重新打开 |
-| 工具名 `toolName` | 生效于**下一次安装**（新任务/新会话）。已在运行的会话手里仍是旧名字，直到该 Agent 重装 |
-| 列出不可用定义 `reportFailuresToModel` | 同上，生效于下一次安装 |
+| 工具名 `toolName` | **立即**：每个运行中 Agent 用新名字重新注册（旧注册先释放） |
+| 列出不可用定义 `reportFailuresToModel` | **立即**：工具描述重新生成 |
 
-> 换句话说：`trustProjectAgents` 决定"调用时读什么"，`watchDefinitions` 决定"模型看到的列表是否自动刷新"，另外两项决定"模型看到的工具长什么样"。保存本身会写入 profile 补丁，因此改动不会丢；**刷新浏览器不影响其中任何一项**（工具表是 Host 侧按 Agent 安装的，浏览器只影响界面）。
+> 换句话说：四项都在保存后**立即**作用于运行中的会话，不需要重启、不需要新会话。保存本身会写入 profile 补丁，因此改动不会丢；**刷新浏览器不影响其中任何一项**（工具表是 Host 侧按 Agent 安装的，浏览器只影响界面）。
 >
-> 技术细节：只改这四个开关时，Loader 不会重挂本插件行，而是原地更新取值并通知插件（`loader/volatile-update`），因此上述时机不需要重启也不需要新会话。
+> 技术细节：只改这四个开关时，Loader 不会重挂本插件行，而是原地更新取值并通知插件（`loader/volatile-update`）。本插件收到通知后对每个运行中 Agent 重新执行一次"发现 + 安装"——因为四项都改变已安装工具的内容（列表、名字、描述），只更新 watcher 不足以让运行中的会话看到。代价是保存设置时每个 Agent 的工具会被替换一次，这与"改一个 `.toml` 文件"走的是同一条路径。
 
 ## 与智能体团队（Agent Teams）不支持组合使用
 
@@ -190,7 +190,7 @@ if (-not (Test-Path $manifest)) {
 1. **问清三件事**：用途与边界、能不能改文件/跑命令、定义放在哪个目录；
 2. **按规范写文件**：把它写到 `$DSH_HOME/agents/`（默认，始终加载），或在你明确要求"随仓库分发"时写到 `<项目根>/.dsh/agents/`；
 3. **提醒你信任开关**：写入项目目录时它会告诉你，需要先在插件设置里打开「信任项目级定义」，否则该文件不会加载；
-4. **告诉你结果**：定义的 `name` 就是调用时的 `agent_type`，写完**下一次委派即生效**（模型看到的列表在下一次安装刷新）。
+4. **告诉你结果**：定义的 `name` 就是调用时的 `agent_type`，写完**下一次委派即生效**（模型看到的列表在下一次安装或设置写入时刷新）。
 
 技能正文里带着字段规范与常见坑（`max_depth = 0` 必然失败、`output_schema` 只能配 `one-shot`、`[tools]` 工具名是部署相关的、哪些 provider 支持模型路由/persona），所以模型不需要你解释这些；需要更深的细节时它会读包内的 `guide/technical.md` 与 `guide/*.toml` 模板。
 
@@ -264,7 +264,7 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 | 键 | 必填 | 类型 / 可选项 | 默认 | 作用与约束 |
 |---|---|---|---|---|
 | `name` | **是** | string，`[A-Za-z0-9][A-Za-z0-9_-]{0,63}` | — | `agent_type` 的取值。**同一目录内重名 → 两个定义都失败**；跨目录同名时项目覆盖用户 |
-| `description` | **是** | 非空 string | — | 模型选择该子代理的依据 |
+| `description` | **是** | 非空 string | — | **模型选择该子代理的依据**：会以 `<name> — <description>` 的形式写进 `agent_type` 参数说明（枚举本身只带名字），所以写清"什么时候该用它" |
 | `enabled` | 否 | `true` / `false` | `true` | `false`：不进 `agent_type` 列表与工具描述；显式调用报 `subagent "x" is disabled in <file>` |
 | `mode` | 否 | `"one-shot"` / `"continuable"` | `"one-shot"` | `one-shot`：等待子代理完成并返回文本；`continuable`：**立即**返回 `started subagent <childId>`——本次调用不带结论，子代理收尾时**会**把它的最终文本作为结算通知投递给父会话（前提是结论写在最后一条消息里，见 [继续一个 continuable 子代理](#继续一个-continuable-子代理依赖官方控制工具)） |
 | `provider` | 否 | 已注册的传输名（随 profile 而定，如 `spawn`/`fork`/`acp`/`codex`/`claude-code`/`dsh-sdk`） | 插件行 `defaultProvider`（`spawn`） | 未注册时调用报错并列出已注册的 provider 名 |
@@ -427,11 +427,11 @@ npm run build          # 产出 lib/*.js、lib/types/*.d.ts 与 lib/client.js
 本插件**不 import 任何 `@deepseek-ai/dsh-*` 包**：它只通过 `src/host.ts` 里的结构性类型调用 Harness 的服务，因此发布包的版本落后于运行时也不会把它锁死。代价是"声明被改名"这类变化编译器不会发现，所以有一个专门的检查：
 
 ```sh
-npm run check:harness                              # 自动解析已安装的 @deepseek-ai/dsh
+npm run check:harness                              # 自动解析已安装的 @deepseek-ai/dsh，解析不到就找 node.exe 旁边的全局安装
 DSH_SHAPE_ROOT=<node_modules> npm run check:harness  # 指定别的安装位置
 ```
 
-它会逐条读取已安装包的声明文件，核对本插件用到的每个名字（`subagents.start` / `startContinuable` / `getProvider` / `resolveMaxDepth`、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`loader/volatile-update`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` 等），任何一条消失就打印 `DRIFT` 并以非零码退出，指明要改哪个模块（`src/host.ts`、`src/harness.ts`、客户端半边）。它**不在 `npm test` 里**，因为单测刻意不需要 DSH 环境。
+它会逐条读取已安装包的声明文件，核对本插件用到的每个名字（`subagents.start` / `startContinuable` / `getProvider` / `resolveMaxDepth`、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`loader/volatile-update`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` 等），任何一条消失就打印 `DRIFT` 并以非零码退出，指明要改哪个模块（`src/host.ts`、`src/harness.ts`、客户端半边）。**本机根本没有 DSH 时**它单独报一句 `no DeepSeek Harness installation found` 并以退出码 1 结束，而不是把 16 条声明全判成 DRIFT——"没装"与"被改名"必须区分开，否则第一眼的结论正好是反的。它**不在 `npm test` 里**，因为单测刻意不需要 DSH 环境。
 
 `src/harness.ts` 是全项目唯一做能力探测的地方：composition 缺少某个可选服务时（Agent 注册表、共享深度策略、技能注册表），它会**在加载时明确告知缺什么、会少哪个功能**，而不是在用到时才静默降级。
 

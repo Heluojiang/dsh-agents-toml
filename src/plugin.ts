@@ -17,7 +17,7 @@ import { discoverAgents, nodeDiscoveryIo, type DiscoveryIo, type DiscoveryResult
 import { createHarness, type Harness } from './harness.ts'
 import type { AgentLike, ContextLike } from './host.ts'
 import { Installations, type InstallationOutcome } from './installation.ts'
-import { buildDelegationTool } from './tool.ts'
+import { buildDelegationTool, type InstalledSubagent } from './tool.ts'
 
 /**
  * Resolved plugin configuration.
@@ -207,14 +207,24 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
    * A write that changes only volatile fields does not restart the row: the
    * Loader commits the new value into the reference this plugin reads and
    * announces the change, so this event is the only chance to act on a setting
-   * before the next install. The reconciliation is derived from the config
-   * accessor — already updated — instead of from the announced paths, so a
-   * runtime that reports them differently still gets the same result; a write
-   * that changes an ordinary field remounts the row instead and arrives here
-   * through the effect's cleanup.
+   * before the next install. Three of the four settings change what an installed
+   * tool carries — `trustProjectAgents` which definitions it lists,
+   * `toolName` its registered name, `reportFailuresToModel` its description — so
+   * every live Agent is re-installed here rather than waiting for one to be
+   * created. `install` reconciles the watchers as its last step, which covers
+   * `watchDefinitions`. The reconciliation is derived from the config accessors —
+   * already updated — instead of from the announced paths, so a runtime that
+   * reports them differently still gets the same result; a write that changes an
+   * ordinary field remounts the row instead and arrives here through the
+   * effect's cleanup.
    */
-  function settingsChanged(): void {
-    syncWatchers()
+  async function settingsChanged(): Promise<void> {
+    try {
+      await reinstallAll()
+      syncWatchers()
+    } catch (error) {
+      ctx.logger.warn(`dsh-agents-toml: could not apply a settings change: ${String(error)}`)
+    }
   }
 
   /** Report each provider that cannot enforce a depth cap, once per process. */
@@ -232,17 +242,20 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
     reportFailures(discovery)
     const available = discovery.definitions.filter(definition => definition.enabled)
     if (available.length === 0) return { watchedDirs: discovery.watchedDirs }
-    const inheriting = new Set<string>()
-    for (const definition of available) {
+    const installed: InstalledSubagent[] = available.map(definition => {
       const provider = ctx.subagents.getProvider(definition.provider ?? config.defaultProvider)
       // A provider that is not registered yet is reported at call time; until
-      // then its definitions are described as non-inheriting.
-      if (provider === undefined) continue
-      if (provider.inheritsParentContext) inheriting.add(definition.name)
-      if (!provider.capabilities.depthLimit && definition.maxDepth === undefined) {
+      // then its definition is described as non-inheriting.
+      if (provider !== undefined && !provider.capabilities.depthLimit && definition.maxDepth === undefined) {
         reportDepthless(provider.name)
       }
-    }
+      return {
+        name: definition.name,
+        description: definition.description,
+        continuable: definition.mode === 'continuable',
+        inherits: provider?.inheritsParentContext ?? false,
+      }
+    })
     const fiber = harness.registerToolIn(agent, scoped => {
       scoped.tools.register(buildDelegationTool({
         toolName: config.toolName(),
@@ -251,11 +264,7 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
         subagents: scoped.subagents,
         hostDepth: () => harness.hostDepth(),
         load: (caller: AgentLike) => load(caller),
-        installedNames: available.map(definition => definition.name),
-        installedContinuable: available
-          .filter(definition => definition.mode === 'continuable')
-          .map(definition => definition.name),
-        installedInheriting: [...inheriting],
+        installed,
         installedFailures: discovery.failures,
       }))
     })

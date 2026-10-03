@@ -145,8 +145,9 @@ export interface FakeContext {
    * Announce a settings write the way the Loader does when only volatile fields
    * changed: the row is not restarted, and the touched paths are reported.
    * @param paths - the configuration paths the write changed.
+   * @returns settlement of every listener's reaction.
    */
-  emitVolatileUpdate(paths: readonly (readonly string[])[]): void
+  emitVolatileUpdate(paths: readonly (readonly string[])[]): Promise<void>
 }
 
 /** One provider registration observed on the fake skills service. */
@@ -168,7 +169,7 @@ export function createFakeContext(subagents: SubagentService): FakeContext {
   const registry: AgentLike[] = []
   const skillRegistrations: FakeSkillRegistration[] = []
   type Payload = { agent: AgentLike }
-  type VolatileListener = (paths: readonly (readonly string[])[]) => void
+  type VolatileListener = (paths: readonly (readonly string[])[]) => unknown
   const listeners = new Map<'agent/created' | 'agent/disposed', ((payload: Payload) => unknown)[]>()
   const volatileListeners: VolatileListener[] = []
 
@@ -249,8 +250,8 @@ export function createFakeContext(subagents: SubagentService): FakeContext {
     emitDisposed(agent) {
       for (const listener of [...listeners.get('agent/disposed') ?? []]) listener({ agent })
     },
-    emitVolatileUpdate(paths) {
-      for (const listener of [...volatileListeners]) listener(paths)
+    async emitVolatileUpdate(paths) {
+      for (const listener of [...volatileListeners]) await listener(paths)
     },
   }
 }
