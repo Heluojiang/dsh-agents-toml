@@ -68,7 +68,7 @@ allowBuilds:
 # dev.patch.yml
 - insert:
     - id: dsh-agents-toml
-      name: 'D:/Work/Codes/Others/dsh-agents-toml/lib/index.js'
+      name: '/absolute/path/to/dsh-agents-toml/lib/index.js'
 ```
 
 ```sh
@@ -431,15 +431,83 @@ npm run build          # 产出 lib/*.js、lib/types/*.d.ts 与 lib/client.js
 |---|---|---|
 | Loader（默认跑） | 已安装的 DSH | 用真实 `cordis-plugin-loader` 建行、建 Agent、写设置：项目定义即时安装、volatile 写入重装而不重挂、关闭信任释放工具、重名双向剔除、关监听后文件不再触发重装 |
 | 委派（`E2E_PROJECT` + `E2E_API_KEY`） | 模型凭据 | 真跑一次 `dsh --profile … --json`，从会话日志核对 `subagent_custom` 的 `agent_type` 枚举、子代理工具表里 `deny` 是否生效、AGENTS.md 是否注入子代理 |
-| 浏览器（`E2E_GUI`） | 一个运行中的 Web 实例 + CDP 端口 | 在**已打开**的会话里改设置/改定义文件，从该会话后续请求的日志核对枚举当场变化；`continuable` 子代理的收尾文本是否作为结算通知回投父会话 |
+| 浏览器（`E2E_GUI`） | 一个运行中的 Web 实例 + 带调试端口的浏览器 | 在**已打开**的会话里改设置/改定义文件，从该会话后续请求的日志核对枚举当场变化；`continuable` 子代理的收尾文本是否作为结算通知回投父会话 |
+
+#### 环境变量
+
+| 变量 | 默认 | 用途 |
+|---|---|---|
+| `E2E_DSH_ROOT` | 解析已安装的 `@deepseek-ai/dsh`，再退回 `node.exe` 旁边的全局安装 | 被测 Harness 的安装目录；Loader 档要它的 `cordis` 与 `cordis-plugin-loader` |
+| `E2E_PLUGIN_ROOT` | 本仓库根 | 被测插件；Loader 档加载它的 `lib/index.js`，所以先 `npm run build` |
+| `E2E_HOME` | 无 | 一次性 `DSH_HOME`。委派档与浏览器档**必需**（要有 profile 与会话目录） |
+| `E2E_PROFILE` | `plugin-dev` | `E2E_HOME` 里给委派档用的 profile 名 |
+| `E2E_GUI_PROFILE` | `plugin-gui` | 浏览器实例所用 profile 名；浏览器档通过它找到 `cordis.patch.yml` 来读回设置写入 |
+| `E2E_PROJECT` | 无 | 被检查的**真实项目**（要有 `.dsh/agents/*.toml`）。脚本只读它：跑前跑后逐个 SHA-256 比对并核对 `git status --porcelain` |
+| `E2E_API_KEY` | 无 | provider key。不给就**跳过**委派档而不是判失败 |
+| `E2E_BASE_URL` | 无 | provider 的 base URL；key 不是发给默认端点时设置 |
+| `E2E_GUI` | 无 | 运行中的 Web 实例 URL（**含 token**）。给了才跑浏览器档 |
+| `E2E_CDP_PORT` | `9222` | 那个浏览器的远程调试端口 |
+
+#### 三档怎么跑
+
+**① Loader 档**——不需要凭据，几秒钟。先构建，因为 Loader 档加载的是 `lib/` 而不是 `src/`：
 
 ```sh
-node scripts/e2e.mjs                                    # 只跑 Loader 档
-E2E_HOME=… E2E_PROJECT=… E2E_API_KEY=… node scripts/e2e.mjs
-E2E_GUI=http://127.0.0.1:3931/?token=… node scripts/e2e.mjs
+npm install && npm run build
+npm run check:e2e          # 或 node scripts/e2e.mjs
 ```
 
-约定：`E2E_HOME` 用一次性 home；`E2E_PROJECT` 用真实项目，脚本在跑之前后对 `AGENTS.md` 与 `.dsh/agents/*.toml` 逐个算 SHA-256 并比对 `git status --porcelain`，跑完必须一字不差；凭据只从环境变量读。浏览器档连的是**调用者自己起的**实例（`E2E_CDP_PORT`，默认 9222），不会去碰别的端口。它**不在 `npm run check` 里**，也不在 `prepublishOnly` 里：三档都需要真实环境，且浏览器档会消耗真实额度。
+**② 委派档**——先造一个一次性 home 和一个打开信任的 profile，再把 key 从环境变量传进去：
+
+```sh
+export E2E_HOME=/tmp/dsh-e2e
+export E2E_PROJECT=/path/to/your/project        # 有 .dsh/agents/*.toml 的项目
+export E2E_API_KEY=sk-...
+export E2E_BASE_URL=https://your-endpoint/v1    # 可选
+
+dsh --profile plugin-dev --from-default-profile headless
+dsh plugin --profile plugin-dev add "$PWD"
+# 在 profile 补丁里打开 trustProjectAgents（见「插件设置项」），或让项目定义先不生效看反例
+
+node scripts/e2e.mjs
+```
+
+这一档会真跑一次模型，消耗真实额度；断言全部读会话日志，因此**不依赖模型说了什么**。
+
+**③ 浏览器档**——需要三样东西同时活着：一个 Web 实例、一个带远程调试端口的浏览器、以及它们所属的一次性 home。缺任何一样这一档都跑不起来，所以下面按顺序给出全部命令。
+
+```sh
+# 1) 隔离 home 与 profile（不要用你日常那个 profile）
+export E2E_HOME=/tmp/dsh-e2e
+dsh --profile plugin-gui --from-default-profile web
+dsh plugin --profile plugin-gui add "$PWD"
+
+# 2) 起 Web 实例（用私有端口，避免和日常实例抢）；控制台会打印带 token 的 URL
+dsh --profile plugin-gui --port 3931 --no-open
+#    记下形如 http://127.0.0.1:3931/?token=<token> 的地址
+
+# 3) 起浏览器并开远程调试（用独立 user-data-dir：Chrome 136+ 禁止在默认
+#    user-data-dir 上开远程调试，用默认目录会静默失败）
+#    Chrome/Edge 均可，端口与下一步的 E2E_CDP_PORT 必须一致
+chrome --remote-debugging-port=9222 --user-data-dir=/tmp/cdp-profile \
+       --no-first-run --no-default-browser-check about:blank
+
+# 4) 跑这一档
+export E2E_PROJECT=/path/to/your/project
+export E2E_GUI='http://127.0.0.1:3931/?token=<token>'
+node scripts/e2e.mjs
+```
+
+在 Windows PowerShell 里把 `export X=…` 换成 `$env:X = '…'`，`$PWD` 换成 `(Get-Location).Path`，第 3 步的浏览器命令换成：
+
+```powershell
+Start-Process chrome -ArgumentList '--remote-debugging-port=9222',
+  '--user-data-dir=D:\temp\cdp-profile','--no-first-run','--no-default-browser-check','about:blank'
+```
+
+浏览器档检查的是**会话日志**（谁在什么时刻被注册、`agent_type` 枚举是什么），不是画面，因此无头启动也可以；但 Chrome 在窗口被最小化或完全遮挡时可能不响应截图——这一档不截图，所以不受影响。
+
+约定：`E2E_HOME` 用一次性 home；`E2E_PROJECT` 用真实项目，脚本在跑之前后对 `AGENTS.md` 与 `.dsh/agents/*.toml` 逐个算 SHA-256 并比对 `git status --porcelain`，跑完必须一字不差；凭据只从环境变量读。浏览器档连的是**调用者自己起的**实例（`E2E_CDP_PORT`，默认 9222），不会去碰别的端口。它**不在 `npm run check` 里**，也不在 `prepublishOnly` 里：三档都需要真实环境，且委派档与浏览器档会消耗真实额度。
 
 ## 边界与演进（DSH 升级时看这里）
 

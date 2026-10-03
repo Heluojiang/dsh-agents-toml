@@ -306,19 +306,29 @@ pnpm ≥10 默认拦截依赖的构建脚本：第一次 `add` 会以 `ERR_PNPM_
 
 ## 16. 隔离式端到端验证步骤
 
-真机验证请使用一次性 Harness home 与一次性 profile，别碰正在使用的 profile：
+真机验证请使用一次性 Harness home 与一次性 profile，别碰正在使用的 profile。下面用**占位路径**；请替换成你自己的仓库路径与目录。
 
 ```powershell
-$env:DSH_HOME = 'D:\temp\dsh-plugin-e2e\home'
+$env:DSH_HOME = '<your-temp-home>'                 # 例如 D:\temp\dsh-plugin-e2e\home
 dsh --profile plugin-dev --from-default-profile web
-dsh plugin --profile plugin-dev add D:\Work\Codes\Others\dsh-agents-toml
+dsh plugin --profile plugin-dev add '<path-to-this-repo>'
 dsh --profile plugin-dev --dump-config | Select-String dsh-agents-toml
 dsh --profile plugin-dev --port 3099 --no-open     # 控制台会打印带 token 的 URL
 ```
 
 验证要点：`--dump-config` 里出现插件行与 `config`；启动后新任务里能看到该工具与 `agent_type` 列表；真机委派后检查会话日志（`sessions/.../session.v4.jsonl.zstd`，多帧 zstd）里的 `tool/call`、`subagent/catalog` 与子会话文件。设置项的写入可以直接观察 profile 的 `cordis.patch.yml` 是否被更新。
 
-以上步骤已脚本化为 `npm run check:e2e`（`scripts/e2e.mjs`）。它按环境变量分三档：默认只跑不需要凭据的 Loader 档（用真实 `cordis-plugin-loader` 建行建 Agent，验证 volatile 写入的重装语义）；给了 `E2E_PROJECT` 与 `E2E_API_KEY` 再跑真实委派档；给了 `E2E_GUI` 再跑浏览器档，用 CDP 驱动调用者自己起的 Web 实例，验证"已打开的会话"里改设置与改定义文件都会当场反映到下一次请求。真实项目只读：脚本跑前跑后对 `AGENTS.md` 与 `.dsh/agents/*.toml` 逐个 SHA-256 比对，并比对 `git status --porcelain`。该档**不在** `npm run check` 与 `prepublishOnly` 里。
+### 16.1 脚本化：`npm run check:e2e`
+
+以上手工步骤已脚本化为 `scripts/e2e.mjs`，按环境变量分三档（十个变量的完整含义、三档各自要预先启动什么、以及 PowerShell 写法，见 [README · 真机复验](../README.md#真机复验npm-run-checke2e)）：
+
+| 档 | 启动条件 | 观察点 |
+|---|---|---|
+| Loader | 只需已安装的 DSH；先 `npm run build`（加载 `lib/`） | 用真实 `cordis-plugin-loader` 建行、建 Agent、`entry.update` 写设置，检查到达 `tools.register` 的定义：即时安装、volatile 写入不重挂（`fiber.state === 2`）、关信任释放 fiber、重名双向剔除且原因进描述、`watchDefinitions` 两个方向 |
+| 委派 | 一次性 home + 打开信任的 profile + `E2E_API_KEY` | 真跑 `dsh --profile … --json`，从会话日志读 `request/header`：`agent_type` 枚举、`deny` 造成的工具缺失、AGENTS.md 注入子会话 |
+| 浏览器 | 上一档的条件，**外加**运行中的 Web 实例（`E2E_GUI`，含 token）与带 `--remote-debugging-port` 的独立浏览器 | C1 已在运行的会话里保存设置后，其**下一次请求**的枚举变化；C4 会话运行期间增删 `.toml`；C3 `continuable` 子代理的收尾文本以 `agent/inbox/spliced`（`next-turn` 或 `next-step`）回投父会话 |
+
+三档共同的约束：真实项目只读（跑前跑后对 `AGENTS.md` 与 `.dsh/agents/*.toml` 逐个 SHA-256 比对，并比对 `git status --porcelain`）；凭据只从环境变量读；浏览器档只连调用者指定的端口。该档**不在** `npm run check` 与 `prepublishOnly` 里——三档都需要真实环境，另两档会消耗真实额度。
 
 ## 17. 内置 Skill
 包内 `assets/skill/SKILL.md` 是**模型可见**的定义撰写指南（英文，与工具描述一致），让用户在装完插件后用自然语言就能得到一份合法定义。
