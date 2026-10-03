@@ -295,6 +295,42 @@ describe('createPlugin', () => {
     assert.equal(b.watches[0]?.closed, true)
   })
 
+  it('applies a settings write that reaches the row without restarting it', async () => {
+    // A write touching only volatile fields does not remount the row: the Loader
+    // commits the new value into the reference the plugin reads and announces the
+    // change. Acting on that event is the only way a running session sees it; no
+    // further Agent is created and no file changes.
+    let watching = true
+    const b = bench({ watchDefinitions: () => watching })
+    b.io.mkdir(USER_DIR)
+    b.io.write(join(USER_DIR, 'reviewer.toml'), definition('reviewer'))
+    await created(b.fake)
+    assert.equal(b.watches.length, 1)
+    assert.equal(b.watches[0]?.closed, false)
+
+    watching = false
+    b.fake.emitVolatileUpdate([['watchDefinitions']])
+
+    assert.equal(b.watches[0]?.closed, true)
+
+    watching = true
+    b.fake.emitVolatileUpdate([['watchDefinitions']])
+    assert.equal(b.watches.length, 2)
+    assert.equal(b.watches[1]?.closed, false)
+  })
+
+  it('leaves the watches alone when the write did not change what to watch', async () => {
+    const b = bench()
+    b.io.mkdir(USER_DIR)
+    b.io.write(join(USER_DIR, 'reviewer.toml'), definition('reviewer'))
+    await created(b.fake)
+
+    b.fake.emitVolatileUpdate([['toolName'], ['reportFailuresToModel']])
+
+    assert.equal(b.watches.length, 1)
+    assert.equal(b.watches[0]?.closed, false)
+  })
+
   it('opens the watch once a missing definition directory appears', async () => {
     // `fs.watch` reports ENOENT for a directory that does not exist yet, and
     // caching that attempt as if it were a watch would never observe the

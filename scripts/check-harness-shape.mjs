@@ -56,6 +56,9 @@ const REQUIREMENTS = [
   { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'readonly depthLimit:', why: 'the depthLimit capability bit' },
   { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'readonly inheritsParentContext:', why: 'the conversation-sharing descriptor' },
   { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'prepareContinuable?', why: 'the continuable capability signal' },
+  // cordis-plugin-loader: the only signal a volatile settings write reaches the
+  // plugin through, because such a write does not remount the row.
+  { file: 'cordis-plugin-loader/lib/index.js', contains: 'loader/volatile-update', why: 'the volatile settings-write event' },
   // dsh-skill: the registry the packaged authoring guide is published through.
   { file: 'dsh-skill/lib/types/index.d.ts', contains: 'registerProvider(', why: 'skills.registerProvider' },
   // dsh-api-remotes: the event the client half refreshes on.

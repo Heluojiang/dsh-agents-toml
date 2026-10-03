@@ -170,7 +170,7 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 |---|---|
 | 增删改 `*.toml` | **不需要**：调用时重读；`watchDefinitions` 开启时枚举同步刷新（防抖 200ms） |
 | 关闭 `watchDefinitions` | **立即**关闭已打开的目录监听；此后新名字要等该 Agent 下次创建才进枚举，但直接调用新名字仍即时生效 |
-| 插件页设置项写入 | **不需要**：写入落到 profile 补丁。四个键的生效点不同——`trustProjectAgents` 每次发现定义时读取（下一次委派即生效）；`watchDefinitions` 立即生效；`toolName` 与 `reportFailuresToModel` 在下一次安装（新任务/新会话）时读取 |
+| 插件页设置项写入 | **不需要**：写入落到 profile 补丁。只改 volatile 字段时 Loader **不重挂该行**，而是原地更新引用并发出 `loader/volatile-update`，插件在该事件里重新对齐目录监听——因此 `watchDefinitions` 立即生效；`trustProjectAgents` 每次发现定义时读取（下一次委派即生效）；`toolName` 与 `reportFailuresToModel` 在下一次安装（新任务/新会话）时读取。改到非 volatile 字段（`defaultProvider` / `projectAgentsDir` / `userAgentsDir`）则会重挂该行 |
 | 手改 `cordis.patch.yml` | 开启 HMR 的 profile 会重载该行；关闭 HMR 的 profile 需要重启 |
 | 安装/卸载插件 bundle | web profile（默认开 HMR）不需要重启；HMR 关闭的 profile 需要 |
 | 升级插件自身代码 | 已加载模块不热替换，建议重启；刷新浏览器会重新拉取 `lib/client.js` |
@@ -248,7 +248,7 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 | `scripts/build-client.mjs` | 把 CJS 产物包装成 `window.__ModuleLoader__.load({id, factory})` 并校验自洽 |
 | `scripts/check-harness-shape.mjs` | 用已安装的 DSH 校验本插件依赖的声明是否还在（`npm run check:harness`） |
 
-宿主契约：`ctx.tools.register`、`ctx.subagents.{getProvider,list,start,startContinuable,resolveMaxDepth?}`、`ctx.on('agent/created'|'agent/disposed')`、`ctx.inject`、`ctx.get('agents')`、`ctx.logger`、`ctx.effect`。
+宿主契约：`ctx.tools.register`、`ctx.subagents.{getProvider,list,start,startContinuable,resolveMaxDepth?}`、`ctx.on('agent/created'|'agent/disposed'|'loader/volatile-update')`、`ctx.inject`、`ctx.get('agents')`、`ctx.logger`、`ctx.effect`。
 客户端契约：`ctx.slots.{inject,register}`、`ctx.locale.register`、`ctx.configForms.{get,whileServed}`、`ctx.effect`。
 运行时依赖仅 `@deepseek-ai/schemastery`（Config schema）与 `smol-toml`；构建用 `tsc` 产出 ESM + `.d.ts`，客户端半边用 `tsc`（CJS）+ `scripts/build-client.mjs` 产出 `lib/client.js`，**不需要打包器**（客户端半边必须是单文件：shell 每个包只服务一个产物，factory 不能同步 require 兄弟 chunk）。
 
@@ -259,7 +259,7 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 | 守卫 | 位置 | 检查什么 |
 |---|---|---|
 | 架构单测 | `tests/architecture.spec.ts` | 宿主半边不得 import 任何 `@deepseek-ai/dsh-*`；客户端半边只能用 shell 模块表里的名字且不得把它列为依赖；manifest 名 = 补丁行名 = 客户端 `BUNDLE_NAME` = `ENTRY_ID`；`.volatile()` 字段恰好是卡片渲染的四个 |
-| 运行时声明检查 | `npm run check:harness` | 逐条核对已安装 DSH 的声明：`subagents.start` / `startContinuable` / `getProvider` / `resolveMaxDepth`、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`prepareContinuable`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` / `listPlugins`、两个团队包。缺一条即 `DRIFT` + 非零退出，并指出要改的模块 |
+| 运行时声明检查 | `npm run check:harness` | 逐条核对已安装 DSH 的声明：`subagents.start` / `startContinuable` / `getProvider` / `resolveMaxDepth`、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`prepareContinuable`、`loader/volatile-update`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` / `listPlugins`、两个团队包。缺一条即 `DRIFT` + 非零退出，并指出要改的模块 |
 
 `check:harness` 刻意**不进 `npm test`**（单测不依赖 DSH 安装）；它在本地与发布前手动运行，且可用 `DSH_SHAPE_ROOT` 指向别的安装位置。
 

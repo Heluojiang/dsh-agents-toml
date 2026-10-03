@@ -90,11 +90,13 @@ dsh web --patch ./dev.patch.yml
 | 设置项 | 写入后什么时候生效 |
 |---|---|
 | 信任项目级定义 `trustProjectAgents` | 生效于**下一次委派**：每次发现定义时都会读取 |
-| 监听定义目录 `watchDefinitions` | 立即：关掉会**关闭已打开的目录监听**，打开会在下一次安装时重新打开 |
+| 监听定义目录 `watchDefinitions` | 立即：关掉会**关闭已打开的目录监听**，打开会马上重新打开 |
 | 工具名 `toolName` | 生效于**下一次安装**（新任务/新会话）。已在运行的会话手里仍是旧名字，直到该 Agent 重装 |
 | 列出不可用定义 `reportFailuresToModel` | 同上，生效于下一次安装 |
 
-> 换句话说：`trustProjectAgents` 决定"调用时读什么"，`watchDefinitions` 决定"模型看到的列表是否自动刷新"，另外两项决定"模型看到的工具长什么样"。保存本身会写入 profile 补丁，因此改动不会丢。
+> 换句话说：`trustProjectAgents` 决定"调用时读什么"，`watchDefinitions` 决定"模型看到的列表是否自动刷新"，另外两项决定"模型看到的工具长什么样"。保存本身会写入 profile 补丁，因此改动不会丢；**刷新浏览器不影响其中任何一项**（工具表是 Host 侧按 Agent 安装的，浏览器只影响界面）。
+>
+> 技术细节：只改这四个开关时，Loader 不会重挂本插件行，而是原地更新取值并通知插件（`loader/volatile-update`），因此上述时机不需要重启也不需要新会话。
 
 ## 与智能体团队（Agent Teams）不支持组合使用
 
@@ -429,6 +431,14 @@ npm run check:harness                              # 自动解析已安装的 @d
 DSH_SHAPE_ROOT=<node_modules> npm run check:harness  # 指定别的安装位置
 ```
 
-它会逐条读取已安装包的声明文件，核对本插件用到的每个名字（`subagents.start` / `startContinuable` / `getProvider` / `resolveMaxDepth`、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` 等），任何一条消失就打印 `DRIFT` 并以非零码退出，指明要改哪个模块（`src/host.ts`、`src/harness.ts`、客户端半边）。它**不在 `npm test` 里**，因为单测刻意不需要 DSH 环境。
+它会逐条读取已安装包的声明文件，核对本插件用到的每个名字（`subagents.start` / `startContinuable` / `getProvider` / `resolveMaxDepth`、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`loader/volatile-update`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` 等），任何一条消失就打印 `DRIFT` 并以非零码退出，指明要改哪个模块（`src/host.ts`、`src/harness.ts`、客户端半边）。它**不在 `npm test` 里**，因为单测刻意不需要 DSH 环境。
 
 `src/harness.ts` 是全项目唯一做能力探测的地方：composition 缺少某个可选服务时（Agent 注册表、共享深度策略、技能注册表），它会**在加载时明确告知缺什么、会少哪个功能**，而不是在用到时才静默降级。
+
+### 关于 DSH 版本约束（本包为什么不声明 `peerDependencies`）
+
+Harness 会检查插件的 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*` peer 范围，不满足就**拒绝安装**（并提示用 `dsh plugin allow-version` 逐版本放行）。本包故意**不声明**这类 peer：
+
+- 它不 import 任何 DSH 包，所以不存在"版本对不上就加载失败"的机制；权威检查是 `npm run check:harness`，它针对**当前真实安装**逐条核对声明，比一个写在清单里的范围更准确；
+- 写死范围会把"向上兼容"变成"范围之外一律拒绝"：DSH 现在是 `0.2.0-rc.2` 这类预发布版本，`^0.2.0` 这种范围**不匹配预发布**，反而会挡住能正常工作的运行时（本机实测：声明 `^0.2.0` 时安装被拒，改成 `^0.2.0-rc.2` 才能装）；
+- 代价是升级 DSH 后可能出现签名漂移，由 `check:harness` 与 `docs/technical.md` 的宿主契约清单兜住。

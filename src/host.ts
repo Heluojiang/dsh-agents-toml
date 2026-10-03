@@ -196,6 +196,14 @@ export interface ContextLike {
   readonly logger: LoggerLike
   on(event: 'agent/created', listener: (payload: { agent: AgentLike }) => void | Promise<void>): () => void
   on(event: 'agent/disposed', listener: (payload: { agent: AgentLike }) => void): () => void
+  /**
+   * A settings write reaching this row. The Loader updates volatile references
+   * in place and announces the change instead of restarting the row, so this is
+   * the only signal that a volatile setting moved; a runtime without the event
+   * applies the change at the next install instead.
+   * @param paths - the configuration paths the write changed, for diagnostics.
+   */
+  on(event: 'loader/volatile-update', listener: (paths: readonly (readonly string[])[]) => void): () => void
   inject(services: readonly string[], callback: (scoped: ContextLike) => void): FiberLike
   /** Read another service by name; used to reach the Agent registry. */
   get(name: string): unknown

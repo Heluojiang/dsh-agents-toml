@@ -201,6 +201,22 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
     }
   }
 
+  /**
+   * React to a settings write reaching this row.
+   *
+   * A write that changes only volatile fields does not restart the row: the
+   * Loader commits the new value into the reference this plugin reads and
+   * announces the change, so this event is the only chance to act on a setting
+   * before the next install. The reconciliation is derived from the config
+   * accessor — already updated — instead of from the announced paths, so a
+   * runtime that reports them differently still gets the same result; a write
+   * that changes an ordinary field remounts the row instead and arrives here
+   * through the effect's cleanup.
+   */
+  function settingsChanged(): void {
+    syncWatchers()
+  }
+
   /** Report each provider that cannot enforce a depth cap, once per process. */
   const reportDepthless = (provider: string): void => {
     if (reportedDepthless.has(provider)) return
@@ -279,6 +295,7 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
   ctx.on('agent/disposed', ({ agent }) => {
     void remove(agent)
   })
+  ctx.on('loader/volatile-update', settingsChanged)
 
   // Catch Agents that already exist: a one-shot runner creates its Agent while
   // it activates, which can precede this row's activation.

@@ -141,6 +141,12 @@ export interface FakeContext {
   readonly registry: AgentLike[]
   emitCreated(agent: AgentLike): Promise<void>
   emitDisposed(agent: AgentLike): void
+  /**
+   * Announce a settings write the way the Loader does when only volatile fields
+   * changed: the row is not restarted, and the touched paths are reported.
+   * @param paths - the configuration paths the write changed.
+   */
+  emitVolatileUpdate(paths: readonly (readonly string[])[]): void
 }
 
 /** One provider registration observed on the fake skills service. */
@@ -162,7 +168,9 @@ export function createFakeContext(subagents: SubagentService): FakeContext {
   const registry: AgentLike[] = []
   const skillRegistrations: FakeSkillRegistration[] = []
   type Payload = { agent: AgentLike }
+  type VolatileListener = (paths: readonly (readonly string[])[]) => void
   const listeners = new Map<'agent/created' | 'agent/disposed', ((payload: Payload) => unknown)[]>()
+  const volatileListeners: VolatileListener[] = []
 
   const skills: SkillRegistryLike = {
     registerProvider(create) {
@@ -187,6 +195,14 @@ export function createFakeContext(subagents: SubagentService): FakeContext {
       error: (...args) => { logs.push({ level: 'error', message: args.map(String).join(' ') }) },
     },
     on(event, listener) {
+      if (event === 'loader/volatile-update') {
+        const volatile = listener as VolatileListener
+        volatileListeners.push(volatile)
+        return () => {
+          const index = volatileListeners.indexOf(volatile)
+          if (index >= 0) volatileListeners.splice(index, 1)
+        }
+      }
       const list = listeners.get(event) ?? []
       list.push(listener as (payload: Payload) => unknown)
       listeners.set(event, list)
@@ -232,6 +248,9 @@ export function createFakeContext(subagents: SubagentService): FakeContext {
     },
     emitDisposed(agent) {
       for (const listener of [...listeners.get('agent/disposed') ?? []]) listener({ agent })
+    },
+    emitVolatileUpdate(paths) {
+      for (const listener of [...volatileListeners]) listener(paths)
     },
   }
 }
