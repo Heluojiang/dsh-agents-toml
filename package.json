@@ -1,6 +1,6 @@
 {
   "name": "@heluojiang/dsh-agents-toml",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "description": "DeepSeek Harness plugin: declare named subagents in TOML files under ~/.dsh/agents and <projectRoot>/.dsh/agents",
   "type": "module",
   "main": "lib/index.js",
@@ -68,6 +68,7 @@
     "pretest": "npm run build:client",
     "test": "node --test \"tests/**/*.spec.ts\"",
     "check:docs": "node scripts/check-docs.mjs",
+    "check:harness": "node scripts/check-harness-shape.mjs",
     "check": "npm run typecheck && npm run check:docs && npm run test",
     "prepare": "npm run build",
     "prepublishOnly": "npm run check"
