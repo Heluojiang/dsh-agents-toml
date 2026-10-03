@@ -34,10 +34,20 @@ export const nodeDiscoveryIo: DiscoveryIo = {
   async isDirectory(path) {
     try {
       return (await stat(path)).isDirectory()
-    } catch {
-      return false
+    } catch (error) {
+      // Absence and "not a directory" are ordinary answers; a permission or I/O
+      // failure is not, and must reach the caller as a failure record rather
+      // than reading as an empty directory.
+      if (isAbsence(error)) return false
+      throw error
     }
   },
+}
+
+/** Whether a filesystem error means the path is simply not a directory here. */
+function isAbsence(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
 }
 
 /** What discovery needs to locate definition directories. */
@@ -63,8 +73,6 @@ export interface DiscoveryResult {
   readonly userDir: string
   /** Absolute project root, when a working directory exists. */
   readonly projectRoot: string | undefined
-  /** Absolute project definition directory, when project definitions are enabled. */
-  readonly projectDir: string | undefined
   /** Directories a watcher must observe for this result to stay current. */
   readonly watchedDirs: readonly string[]
 }
@@ -75,7 +83,14 @@ interface LoadedDirectory {
 }
 
 async function loadDirectory(dir: string, origin: DefinitionOrigin, io: DiscoveryIo): Promise<LoadedDirectory> {
-  if (!(await io.isDirectory(dir))) return { definitions: [], failures: [] }
+  try {
+    if (!(await io.isDirectory(dir))) return { definitions: [], failures: [] }
+  } catch (error) {
+    return {
+      definitions: [],
+      failures: [{ file: dir, origin, reason: `cannot inspect directory: ${String(error)}` }],
+    }
+  }
 
   const definitions: AgentDefinition[] = []
   const failures: DefinitionFailure[] = []
@@ -111,8 +126,13 @@ async function loadDirectory(dir: string, origin: DefinitionOrigin, io: Discover
     definitions.push(outcome.definition)
   }
 
+  // Only two VALID definitions of one name are a duplicate. A rejected file
+  // that happens to declare the same name names no winner, so it must not
+  // remove the valid definition the user can actually delegate to.
+  const duplicated = new Set<string>()
   for (const [name, indexes] of byName) {
     if (indexes.length < 2) continue
+    duplicated.add(name)
     const files = indexes.map(index => definitions[index]?.file ?? '')
     for (const index of indexes) {
       failures.push({
@@ -123,7 +143,6 @@ async function loadDirectory(dir: string, origin: DefinitionOrigin, io: Discover
       })
     }
   }
-  const duplicated = new Set(failures.flatMap(failure => failure.name === undefined ? [] : [failure.name]))
   return {
     definitions: definitions.filter(definition => !duplicated.has(definition.name)),
     failures,
@@ -156,7 +175,15 @@ export async function discoverAgents(request: DiscoveryRequest): Promise<Discove
   const io = request.io ?? nodeDiscoveryIo
   const userDir = resolve(request.userAgentsDir ?? join(request.homeDir, 'agents'))
 
-  const projectRoot = request.cwd === undefined ? undefined : await findProjectRoot(request.cwd, io)
+  let projectRoot: string | undefined
+  let rootFailure: DefinitionFailure | undefined
+  if (request.cwd !== undefined) {
+    try {
+      projectRoot = await findProjectRoot(request.cwd, io)
+    } catch (error) {
+      rootFailure = { file: request.cwd, origin: 'project', reason: `cannot locate project root: ${String(error)}` }
+    }
+  }
   const projectDir = request.trustProjectAgents && projectRoot !== undefined
     ? resolve(projectRoot, request.projectAgentsDir)
     : undefined
@@ -169,10 +196,9 @@ export async function discoverAgents(request: DiscoveryRequest): Promise<Discove
 
   return {
     definitions: [...merged.values()],
-    failures: [...user.failures, ...project.failures],
+    failures: [...rootFailure === undefined ? [] : [rootFailure], ...user.failures, ...project.failures],
     userDir,
     projectRoot,
-    projectDir,
     watchedDirs: [userDir, ...projectDir === undefined ? [] : [projectDir]],
   }
 }

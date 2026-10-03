@@ -47,7 +47,6 @@ describe('discoverAgents', () => {
     assert.equal(result.definitions[0]?.description, 'from user')
     assert.equal(result.userDir, USER_DIR)
     assert.equal(result.projectRoot, PROJECT)
-    assert.equal(result.projectDir, undefined)
     assert.deepEqual(result.watchedDirs, [USER_DIR])
   })
 
@@ -83,6 +82,49 @@ describe('discoverAgents', () => {
     assert.deepEqual(result.definitions, [])
     assert.equal(result.failures.length, 2)
     assert.match(result.failures[0]?.reason ?? '', /duplicate definition "reviewer"/)
+  })
+
+  it('keeps a valid definition when a different file declaring that name fails to parse', async () => {
+    // A rejected file names no winner, so it must not remove the definition the
+    // user can actually delegate to.
+    const broken = join(PROJECT_DIR, 'broken.toml')
+    const valid = join(PROJECT_DIR, 'reviewer.toml')
+    const io = createMemoryIo(
+      [[broken, 'name = "reviewer"\n'], [valid, definition('reviewer', 'from the valid file')]],
+      [PROJECT_DIR, GIT_DIR, PROJECT],
+    )
+    const result = await discoverAgents({
+      cwd: PROJECT, homeDir: HOME, projectAgentsDir: '.dsh/agents', trustProjectAgents: true, io,
+    })
+    assert.deepEqual(result.definitions.map(entry => entry.name), ['reviewer'])
+    assert.equal(result.definitions[0]?.description, 'from the valid file')
+    assert.equal(result.failures.length, 1)
+    assert.match(result.failures[0]?.reason ?? '', /description is required/)
+  })
+
+  it('reports a directory it cannot inspect instead of reading it as empty', async () => {
+    const unreadable = { ...createMemoryIo([], []), isDirectory: () => Promise.reject(new Error('EACCES')) }
+    const result = await discoverAgents({
+      cwd: undefined, homeDir: HOME, projectAgentsDir: '.dsh/agents', trustProjectAgents: false, io: unreadable,
+    })
+    assert.deepEqual(result.definitions, [])
+    assert.equal(result.failures.length, 1)
+    assert.match(result.failures[0]?.reason ?? '', /cannot inspect directory: Error: EACCES/)
+  })
+
+  it('still loads user definitions when the project root cannot be located', async () => {
+    const io = createMemoryIo([[USER_FILE, definition('reviewer')]], [USER_DIR])
+    const failing = {
+      ...io,
+      isDirectory: (path: string) =>
+        path.endsWith('.git') ? Promise.reject(new Error('EPERM')) : io.isDirectory(path),
+    }
+    const result = await discoverAgents({
+      cwd: NESTED, homeDir: HOME, projectAgentsDir: '.dsh/agents', trustProjectAgents: true, io: failing,
+    })
+    assert.deepEqual(result.definitions.map(entry => entry.name), ['reviewer'])
+    assert.equal(result.failures.length, 1)
+    assert.match(result.failures[0]?.reason ?? '', /cannot locate project root: Error: EPERM/)
   })
 
   it('reports an unreadable file and keeps the readable ones', async () => {
