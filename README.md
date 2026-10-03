@@ -14,7 +14,7 @@
 ### 本地目录（开发/试用）
 
 ```sh
-dsh plugin --profile web add D:\Work\Codes\Others\dsh-agents-toml
+dsh plugin --profile web add <path-to-this-checkout>
 ```
 
 ### npm
