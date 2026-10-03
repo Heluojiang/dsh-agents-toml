@@ -67,8 +67,14 @@ export type ParseOutcome =
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/i
 
-/** Keys this format accepts, after hyphen normalization. */
-const KNOWN_KEYS = new Set([
+/**
+ * Every key this format accepts, after hyphen normalization.
+ *
+ * This list is the accepted-key set AND the narrowed type of the table the
+ * parser reads from, so a read of an unlisted key does not compile, and
+ * `tests/definitions.spec.ts` proves each listed key reaches the definition.
+ */
+export const CANONICAL_KEYS = [
   'name',
   'description',
   'enabled',
@@ -82,7 +88,16 @@ const KNOWN_KEYS = new Set([
   'max_depth',
   'output_schema',
   'tools',
-])
+] as const
+
+/** One accepted key, spelled the way TOML spells it. */
+export type CanonicalKey = typeof CANONICAL_KEYS[number]
+
+const KNOWN_KEYS: ReadonlySet<string> = new Set<string>(CANONICAL_KEYS)
+
+function isCanonicalKey(key: string): key is CanonicalKey {
+  return KNOWN_KEYS.has(key)
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -143,11 +158,19 @@ function readDepth(value: unknown, field: string, problems: string[]): number | 
 
 function readStringArray(value: unknown, field: string, problems: string[]): readonly string[] | undefined {
   if (value === undefined) return undefined
-  if (!Array.isArray(value) || value.some(entry => typeof entry !== 'string' || entry.length === 0)) {
+  if (!Array.isArray(value)) {
     problems.push(`${field} must be an array of non-empty tool names`)
     return undefined
   }
-  return value.filter((entry): entry is string => typeof entry === 'string')
+  const entries: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.length === 0) {
+      problems.push(`${field} must be an array of non-empty tool names`)
+      return undefined
+    }
+    entries.push(entry)
+  }
+  return entries
 }
 
 function readToolRestriction(value: unknown, problems: string[]): ToolRestriction | undefined {
@@ -187,10 +210,15 @@ export function parseDefinition(text: string, source: DefinitionSource): ParseOu
   }
   if (!isRecord(parsed)) return fail('the file must contain a TOML table')
 
-  const normalized = new Map<string, unknown>()
-  for (const [key, value] of Object.entries(parsed)) normalized.set(key.replaceAll('-', '_'), value)
-
-  const unknown = [...normalized.keys()].filter(key => !KNOWN_KEYS.has(key))
+  const normalized = new Map<CanonicalKey, unknown>()
+  const unknown: string[] = []
+  for (const [key, value] of Object.entries(parsed)) {
+    // Hyphens and underscores name the same key, so both spellings normalize
+    // before the accepted-key check.
+    const canonical = key.replaceAll('-', '_')
+    if (isCanonicalKey(canonical)) normalized.set(canonical, value)
+    else unknown.push(key)
+  }
   if (unknown.length > 0) return fail(`unknown key(s): ${unknown.join(', ')}`)
 
   const problems: string[] = []

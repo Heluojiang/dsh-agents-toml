@@ -93,7 +93,6 @@ export interface SubagentResult {
 
 /** Published one-shot child handle. */
 export interface SubagentRun {
-  readonly id: unknown
   readonly result: Promise<SubagentResult>
   dispose(): Promise<void>
 }
@@ -183,22 +182,25 @@ export interface AgentLike {
   readonly ctx: ContextLike
 }
 
+/** The subset of the Cordis logger this plugin writes through. */
+export interface LoggerLike {
+  warn(...args: readonly unknown[]): void
+  info(...args: readonly unknown[]): void
+  error(...args: readonly unknown[]): void
+}
+
 /** The subset of the Cordis context this plugin uses. */
 export interface ContextLike {
   readonly tools: { register(definition: ToolDefinition): () => void }
   readonly subagents: SubagentService
-  readonly logger: {
-    warn(...args: readonly unknown[]): void
-    info(...args: readonly unknown[]): void
-    error(...args: readonly unknown[]): void
-  }
+  readonly logger: LoggerLike
   on(event: 'agent/created', listener: (payload: { agent: AgentLike }) => void | Promise<void>): () => void
   on(event: 'agent/disposed', listener: (payload: { agent: AgentLike }) => void): () => void
   inject(services: readonly string[], callback: (scoped: ContextLike) => void): FiberLike
   /** Read another service by name; used to reach the Agent registry. */
-  get?(name: string): unknown
-  /** Absent on foreign contexts; used to close watchers when the plugin unloads. */
-  effect?(callback: () => (() => void) | void): void
+  get(name: string): unknown
+  /** Run a contribution for this plugin's lifetime. */
+  effect(callback: () => (() => void) | void): void
   /** Present on a context that injected `skills`; the optional skill contribution. */
   readonly skills?: SkillRegistryLike
 }

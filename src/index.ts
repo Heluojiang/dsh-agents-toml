@@ -10,7 +10,8 @@
  */
 import Schema from '@deepseek-ai/schemastery'
 
-import type { ContextLike } from './host.ts'
+import type { ContextLike, SkillProviderLike } from './host.ts'
+import { createHarness } from './harness.ts'
 import { createPlugin } from './plugin.ts'
 import { createSkillProvider, readSkillAsset, DEFAULT_SKILL_ASSETS, SKILL_NAME, type SkillAssets } from './skill.ts'
 
@@ -44,18 +45,21 @@ export interface Config {
   watchDefinitions: VolatileField<boolean>
   /** List unavailable definitions in the tool description. */
   reportFailuresToModel: VolatileField<boolean>
-  /** Absolute override for the user definition directory. */
-  userAgentsDir: VolatileField<string | undefined>
+  /** Absolute override for the user definition directory; read once, at load. */
+  userAgentsDir?: string | undefined
 }
 
 /**
  * Configuration schema; invalid values fail the load with an actionable error.
  *
  * The four fields the client settings card edits are `.volatile()`: the Host
- * serves a form only for volatile fields, the card addresses this profile entry
- * by id (`dsh-agents-toml`), and a write persists into the active profile's
- * Cordis patch, which reloads this row. The remaining fields stay patch-only
- * because they address deployment layout rather than a per-user preference.
+ * serves a form only for a field carrying that marker, the card addresses this
+ * profile entry by id (`dsh-agents-toml`), and a write persists into the active
+ * profile's Cordis patch, which reloads this row. The remaining fields stay
+ * patch-only because they address deployment layout rather than a per-user
+ * preference, and `userAgentsDir` in particular is read once, at load, so
+ * offering it a form would promise an edit that only takes effect after a
+ * restart this plugin does not control.
  */
 export const Config = Schema.object({
   trustProjectAgents: Schema.boolean().default(false).volatile(),
@@ -64,33 +68,31 @@ export const Config = Schema.object({
   projectAgentsDir: Schema.string().default('.dsh/agents'),
   watchDefinitions: Schema.boolean().default(true).volatile(),
   reportFailuresToModel: Schema.boolean().default(true).volatile(),
-  userAgentsDir: Schema.string().volatile(),
+  userAgentsDir: Schema.string(),
 })
 
 /**
  * Publish the packaged authoring guide through the skills service.
  *
  * `skills` is deliberately not a declared injection: a composition without the
- * skill registry must still get delegation, so this waits on the service in a
- * child fiber of its own. A missing or malformed asset is reported and skipped
- * for the same reason — a packaging problem must not take the plugin down.
+ * skill registry must still get delegation, so the adapter waits on the service
+ * in a child fiber of its own. A missing or malformed asset is reported and
+ * skipped for the same reason — a packaging problem must not take the plugin down.
  * @param ctx - the Harness context.
  * @param assets - asset locations; the packaged ones unless a test supplies its own.
  */
 export function contributeSkill(ctx: ContextLike, assets: SkillAssets = DEFAULT_SKILL_ASSETS): void {
-  ctx.inject(['skills'], (scoped) => {
-    const skills = scoped.skills
-    if (skills === undefined) return
-    let provider
-    try {
-      provider = createSkillProvider(assets, readSkillAsset(assets))
-    } catch (error) {
-      ctx.logger.error(`dsh-agents-toml: skill "${SKILL_NAME}" is unavailable: ${String(error)}`)
-      return
-    }
-    const dispose = skills.registerProvider(() => provider)
-    ctx.effect?.(() => () => { dispose() })
-  })
+  const harness = createHarness(ctx, ctx.logger)
+  let provider: SkillProviderLike
+  try {
+    provider = createSkillProvider(assets, readSkillAsset(assets))
+  } catch (error) {
+    ctx.logger.error(`dsh-agents-toml: skill "${SKILL_NAME}" is unavailable: ${String(error)}`)
+    return
+  }
+  const dispose = harness.registerSkillProvider(() => provider)
+  if (dispose === undefined) return
+  ctx.effect(() => () => { dispose() })
 }
 
 /**
@@ -106,7 +108,7 @@ export function apply(ctx: ContextLike, config: Config): void {
     projectAgentsDir: config.projectAgentsDir,
     watchDefinitions: () => config.watchDefinitions.get(),
     reportFailuresToModel: () => config.reportFailuresToModel.get(),
-    userAgentsDir: config.userAgentsDir.get(),
+    userAgentsDir: config.userAgentsDir,
   })
   contributeSkill(ctx)
 }
