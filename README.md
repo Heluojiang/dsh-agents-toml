@@ -417,10 +417,29 @@ known global tools: create_goal, edit, …, pwsh, read, write
 npm install
 npm run check          # 两个编译面类型检查 + 文档链接检查 + 单测
 npm run check:harness  # 用已安装的 DSH 校验本插件依赖的声明是否还在（见下）
+npm run check:e2e      # 用真实 Harness 复验"声明如何变成模型可见的工具"（见下）
 npm run build          # 产出 lib/*.js、lib/types/*.d.ts 与 lib/client.js
 ```
 
-测试完全不依赖 DSH 安装，也不读写真实 `$DSH_HOME`。细节与覆盖范围见 [技术文档 · 测试](guide/technical.md#13-测试与构建)。
+单测完全不依赖 DSH 安装，也不读写真实 `$DSH_HOME`。细节与覆盖范围见 [技术文档 · 测试](guide/technical.md#13-测试与构建)。
+
+### 真机复验（`npm run check:e2e`）
+
+单测里的 `tools.register` 是替身，因此"设置写入后正在运行的 Agent 会不会重新安装工具"这条路径在单测里**无法验证**——它取决于 Loader 的 volatile 语义。`scripts/e2e.mjs` 用真实组件复验它，分三档，按环境变量逐档启用：
+
+| 档位 | 需要 | 验证内容 |
+|---|---|---|
+| Loader（默认跑） | 已安装的 DSH | 用真实 `cordis-plugin-loader` 建行、建 Agent、写设置：项目定义即时安装、volatile 写入重装而不重挂、关闭信任释放工具、重名双向剔除、关监听后文件不再触发重装 |
+| 委派（`E2E_PROJECT` + `E2E_API_KEY`） | 模型凭据 | 真跑一次 `dsh --profile … --json`，从会话日志核对 `subagent_custom` 的 `agent_type` 枚举、子代理工具表里 `deny` 是否生效、AGENTS.md 是否注入子代理 |
+| 浏览器（`E2E_GUI`） | 一个运行中的 Web 实例 + CDP 端口 | 在**已打开**的会话里改设置/改定义文件，从该会话后续请求的日志核对枚举当场变化；`continuable` 子代理的收尾文本是否作为结算通知回投父会话 |
+
+```sh
+node scripts/e2e.mjs                                    # 只跑 Loader 档
+E2E_HOME=… E2E_PROJECT=… E2E_API_KEY=… node scripts/e2e.mjs
+E2E_GUI=http://127.0.0.1:3931/?token=… node scripts/e2e.mjs
+```
+
+约定：`E2E_HOME` 用一次性 home；`E2E_PROJECT` 用真实项目，脚本在跑之前后对 `AGENTS.md` 与 `.dsh/agents/*.toml` 逐个算 SHA-256 并比对 `git status --porcelain`，跑完必须一字不差；凭据只从环境变量读。浏览器档连的是**调用者自己起的**实例（`E2E_CDP_PORT`，默认 9222），不会去碰别的端口。它**不在 `npm run check` 里**，也不在 `prepublishOnly` 里：三档都需要真实环境，且浏览器档会消耗真实额度。
 
 ## 边界与演进（DSH 升级时看这里）
 

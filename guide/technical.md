@@ -178,7 +178,6 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 | 升级插件自身代码 | 已加载模块不热替换，建议重启；刷新浏览器会重新拉取 `lib/client.js` |
 
 ## 9. 能力位映射
-
 字段与能力的对照表在 [README · 生效条件](../README.md#生效条件能力位)。本节给出 `src/mapping.ts#CAPABILITY_RULES` 的**判定顺序与报错原文**——它是唯一的判据来源，`tests/mapping.spec.ts` 断言这张表的 id 顺序，因此文档不会与代码漂移：
 
 | 顺序 | 规则 id | 触发条件 | 报错原文 |
@@ -211,6 +210,11 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 | headless | 离线 Messages 协议 stub（脚本化 tool_use） | ✅ 完整委派链路，父子会话各持久化 |
 | headless | **真实模型** | ✅ 36s；项目级定义；persona 命中；工具过滤 25 → 23（`write`/`edit` 消失） |
 | **web GUI** | **真实模型 + CDP 驱动真实点击** | ✅ 模型调用 `subagent_custom`（`agent_type=gui-reviewer`）；子会话 persona 命中、`write/edit=false`；`subagent/catalog` 记录子代理；父子两会话持久化 |
+| **0.3.2 复验：Loader 语义** | 真实 `cordis-plugin-loader`（`scripts/e2e-loader.mjs`） | ✅ 9/9：项目定义即时安装；volatile 写入重装而不重挂（`fiber.state=2`，同一 fiber）；关信任释放工具；重开从空态装回；重名双向剔除且原因进工具描述；关监听后文件不再触发重装，重开后立即拾取 |
+| **0.3.2 复验：设置写入是否到达"已打开的会话"** | GUI + 会话日志（C1） | ✅ 同一会话两次请求对比：写入前 `agent_type` 枚举不存在（=插件未安装该工具），在**已打开**的会话里保存开关后，下一次请求的枚举即为 5 个项目定义，无需重启、无需重开会话 |
+| **0.3.2 复验：定义文件的目录监听** | GUI + 会话日志（C4） | ✅ 会话运行期间新建 toml → 同会话下一次请求的枚举多出该名字；删除后下一次请求又消失（200ms 去抖足够） |
+| **0.3.2 复验：`continuable` 结算通知** | GUI + 会话日志（C3） | ✅ 父会话收到 `agent/inbox/spliced`：`Background subagent <id> finished …` + `Its closing message:`，第二段与子代理最后一条 assistant 消息**逐字相同**；投递目标视父会话当时是否在跑而定（空闲时为 `next-turn`，进行中为 `next-step`，两者都携带通知）；空闲父会话被唤醒继续跑（`turn/start` 1 → 2） |
+| **0.3.2 复验：`[tools] deny` 与 persona 注入** | 真实模型 headless（`scripts/e2e-headless.mjs`） | ✅ 25 个全局工具、`agent_type` 枚举与项目定义逐字一致、枚举说明含每条 `description`；`explorer` 的 `deny = ["write","edit"]` 后子代理侧 23 个工具、`write`/`edit` 消失；AGENTS.md 注入子会话 |
 | **GitHub 安装路径** | 本地 git 克隆模拟 + **真实仓库 `github:Heluojiang/dsh-agents-toml`** | ✅ 干净检出无 `lib/`；pnpm 先拦截 `prepare`，按 pnpm 打印的完整 key（codeload tarball URL + SHA）放行后重跑成功；安装副本由 `prepare` 构建出 `lib/`，且该构建产物能被 Harness 装载（Config schema 被采集、行进入组合） |
 
 验证期间发现并修复的三个缺陷（均由真机暴露）：
@@ -313,6 +317,8 @@ dsh --profile plugin-dev --port 3099 --no-open     # 控制台会打印带 token
 ```
 
 验证要点：`--dump-config` 里出现插件行与 `config`；启动后新任务里能看到该工具与 `agent_type` 列表；真机委派后检查会话日志（`sessions/.../session.v4.jsonl.zstd`，多帧 zstd）里的 `tool/call`、`subagent/catalog` 与子会话文件。设置项的写入可以直接观察 profile 的 `cordis.patch.yml` 是否被更新。
+
+以上步骤已脚本化为 `npm run check:e2e`（`scripts/e2e.mjs`）。它按环境变量分三档：默认只跑不需要凭据的 Loader 档（用真实 `cordis-plugin-loader` 建行建 Agent，验证 volatile 写入的重装语义）；给了 `E2E_PROJECT` 与 `E2E_API_KEY` 再跑真实委派档；给了 `E2E_GUI` 再跑浏览器档，用 CDP 驱动调用者自己起的 Web 实例，验证"已打开的会话"里改设置与改定义文件都会当场反映到下一次请求。真实项目只读：脚本跑前跑后对 `AGENTS.md` 与 `.dsh/agents/*.toml` 逐个 SHA-256 比对，并比对 `git status --porcelain`。该档**不在** `npm run check` 与 `prepublishOnly` 里。
 
 ## 17. 内置 Skill
 包内 `assets/skill/SKILL.md` 是**模型可见**的定义撰写指南（英文，与工具描述一致），让用户在装完插件后用自然语言就能得到一份合法定义。
