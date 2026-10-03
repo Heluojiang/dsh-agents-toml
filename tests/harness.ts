@@ -63,6 +63,12 @@ export interface FakeSubagents {
     readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema'>
     readonly signal: AbortSignal
   }[]
+  /**
+   * Read the service's shared depth policy the way the plugin's harness adapter
+   * does, so a test can drop `resolveMaxDepth` and observe the older-runtime path.
+   * @returns the configured depth, or `undefined` without a policy.
+   */
+  hostDepth(): number | undefined
 }
 
 /**
@@ -108,7 +114,12 @@ export function createFakeSubagents(
     },
     resolveMaxDepth: () => options.depth ?? 1,
   }
-  return { service, started, continuable }
+  return {
+    service,
+    started,
+    continuable,
+    hostDepth: () => (typeof service.resolveMaxDepth === 'function' ? service.resolveMaxDepth(undefined) : undefined),
+  }
 }
 
 /** One tool registration observed on the fake context. */
@@ -264,5 +275,52 @@ export function createMemoryIo(
     isDirectory(path) {
       return Promise.resolve(existing.has(resolve(path)))
     },
+  }
+}
+
+/**
+ * A mutable in-memory filesystem: discovery IO that a test can keep changing
+ * while the plugin runs, which is what the watcher cases need.
+ */
+export class MemoryIo implements DiscoveryIo {
+  readonly files = new Map<string, string>()
+  readonly dirs = new Set<string>()
+
+  /** @param path - directory that exists. */
+  mkdir(path: string): void {
+    this.dirs.add(resolve(path))
+  }
+
+  /**
+   * @param path - file path to create or replace.
+   * @param text - file content.
+   */
+  write(path: string, text: string): void {
+    const absolute = resolve(path)
+    this.files.set(absolute, text)
+    this.dirs.add(dirname(absolute))
+  }
+
+  /**
+   * @param path - file to delete.
+   */
+  remove(path: string): void {
+    this.files.delete(resolve(path))
+  }
+
+  listDefinitionFiles(dir: string): Promise<readonly string[]> {
+    const root = resolve(dir)
+    return Promise.resolve(
+      [...this.files.keys()].filter(path => dirname(path) === root).map(path => basename(path)).sort(),
+    )
+  }
+
+  readFile(file: string): Promise<string> {
+    const text = this.files.get(resolve(file))
+    return text === undefined ? Promise.reject(new Error(`ENOENT: ${file}`)) : Promise.resolve(text)
+  }
+
+  isDirectory(path: string): Promise<boolean> {
+    return Promise.resolve(this.dirs.has(resolve(path)))
   }
 }

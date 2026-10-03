@@ -14,7 +14,9 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { discoverAgents, nodeDiscoveryIo, type DiscoveryIo, type DiscoveryResult } from './discovery.ts'
-import type { AgentLike, AgentRegistryLike, ContextLike, FiberLike } from './host.ts'
+import { createHarness, type Harness } from './harness.ts'
+import type { AgentLike, ContextLike } from './host.ts'
+import { Installations, type InstallationOutcome } from './installation.ts'
 import { buildDelegationTool } from './tool.ts'
 
 /**
@@ -44,43 +46,55 @@ export interface PluginConfig {
 /** Test seams. */
 export interface PluginDependencies {
   readonly io?: DiscoveryIo
-  /** Opens one directory watch; returns its close function. */
-  readonly watchDirectory?: (dir: string, onChange: () => void) => () => void
+  /**
+   * Opens one directory watch.
+   * @param dir - absolute directory to observe.
+   * @param onChange - called after a change.
+   * @returns the close function, or `undefined` when the directory cannot be watched yet.
+   */
+  readonly watchDirectory?: (dir: string, onChange: () => void) => (() => void) | undefined
   readonly debounceMs?: number
   /** Harness home override; tests must set it instead of the ambient environment. */
   readonly homeDir?: string
 }
 
-/** Resolve `$DSH_HOME`, mirroring the Harness default for an unset or blank value. */
-function resolveHomeDir(): string {
-  const configured = process.env['DSH_HOME']?.trim()
-  return configured === undefined || configured.length === 0 ? join(homedir(), '.dsh') : configured
+/** Expand the tilde prefixes the Harness home resolution accepts. */
+function expandHome(value: string): string {
+  if (value === '~') return homedir()
+  if (value.startsWith('~/') || value.startsWith('~\\')) return join(homedir(), value.slice(2))
+  return value
 }
 
-function defaultWatchDirectory(dir: string, onChange: () => void): () => void {
+/**
+ * Resolve `$DSH_HOME` the way the Harness does: a configured home wins over the
+ * environment, a blank environment value counts as unset, tilde prefixes expand
+ * against the OS home, and the result is absolute.
+ * @returns the absolute Harness home.
+ */
+export function resolveHomeDir(): string {
+  const configured = process.env['DSH_HOME']
+  const base = configured !== undefined && configured.trim().length > 0
+    ? expandHome(configured)
+    : join(homedir(), '.dsh')
+  return resolve(base)
+}
+
+/**
+ * Open one directory watch.
+ * @param dir - absolute directory to observe.
+ * @param onChange - called after a change.
+ * @returns the close function, or `undefined` while the directory does not exist.
+ */
+function defaultWatchDirectory(dir: string, onChange: () => void): (() => void) | undefined {
   try {
     const watcher = watchFs(dir, { persistent: false }, () => { onChange() })
     watcher.on('error', () => {})
     return () => { watcher.close() }
   } catch {
-    // A missing directory is not an error: the next install opens its watch.
-    return () => {}
+    // A missing directory reports ENOENT: nothing is watched, and the caller
+    // retries on the next install instead of caching a watcher that is not one.
+    return undefined
   }
-}
-
-/**
- * Read the Agent registry, when the composition exposes it.
- *
- * A one-shot runner creates its Agent while it activates, so this plugin — whose
- * row may be mounted later — would otherwise miss that Agent's `agent/created`.
- * @param ctx - the plugin context.
- * @returns the registry, or `undefined` on a context without one.
- */
-function readAgentRegistry(ctx: ContextLike): AgentRegistryLike | undefined {
-  const registry = ctx.get?.('agents')
-  if (typeof registry !== 'object' || registry === null) return undefined
-  const candidate = registry as { list?: unknown }
-  return typeof candidate.list === 'function' ? registry as AgentRegistryLike : undefined
 }
 
 /**
@@ -93,15 +107,30 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
   const io = deps.io ?? nodeDiscoveryIo
   const openWatch = deps.watchDirectory ?? defaultWatchDirectory
   const homeDir = deps.homeDir ?? resolveHomeDir()
+  const harness: Harness = createHarness(ctx, ctx.logger)
 
-  /** Every Agent this plugin has seen, whether or not it got a tool. */
-  const agents = new Set<AgentLike>()
-  /** Live tool installation per Agent. */
-  const installs = new Map<AgentLike, FiberLike>()
+  const installations = new Installations({
+    installFailed: (agent, error) => {
+      ctx.logger.warn(
+        `dsh-agents-toml: could not install definitions for ${describe(agent)}: ${String(error)}`,
+      )
+    },
+    disposeFailed: (agent, error) => {
+      ctx.logger.warn(`dsh-agents-toml: failed to remove definitions for ${describe(agent)}: ${String(error)}`)
+    },
+  })
+
+  /** Live directory watches, and the directories that could not be watched yet. */
   const watchers = new Map<string, () => void>()
+  const unwatchable = new Set<string>()
   const reportedFailures = new Set<string>()
   const reportedUntrusted = new Set<string>()
+  const reportedDepthless = new Set<string>()
   let debounce: NodeJS.Timeout | undefined
+
+  function describe(agent: AgentLike): string {
+    return agent.session.header.cwd ?? '(no working directory)'
+  }
 
   const load = (agent: AgentLike | undefined): Promise<DiscoveryResult> => discoverAgents({
     cwd: agent?.session.header.cwd,
@@ -131,64 +160,108 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
     }
   }
 
-  const ensureWatchers = (directories: readonly string[]): void => {
-    if (!config.watchDefinitions()) return
-    for (const directory of directories) {
+  /**
+   * Close one watch and forget it.
+   * @param directory - the watched directory.
+   */
+  function closeWatch(directory: string): void {
+    const close = watchers.get(directory)
+    if (close === undefined) return
+    watchers.delete(directory)
+    close()
+  }
+
+  /**
+   * Make the open watches match what the live installations need.
+   *
+   * A directory no longer needed is closed here rather than at the next Agent
+   * creation, which is what makes turning `watchDefinitions` off take effect.
+   */
+  function syncWatchers(): void {
+    if (!config.watchDefinitions()) {
+      for (const directory of [...watchers.keys()]) closeWatch(directory)
+      return
+    }
+    const wanted = new Set(installations.watchedDirs())
+    for (const directory of [...watchers.keys()]) if (!wanted.has(directory)) closeWatch(directory)
+    for (const directory of wanted) {
       if (watchers.has(directory)) continue
-      watchers.set(directory, openWatch(directory, scheduleReinstall))
+      const close = openWatch(directory, scheduleReinstall)
+      if (close === undefined) {
+        if (!unwatchable.has(directory)) {
+          unwatchable.add(directory)
+          ctx.logger.warn(
+            `dsh-agents-toml: cannot watch ${directory} yet; the agent_type list refreshes on the next install`,
+          )
+        }
+        continue
+      }
+      unwatchable.delete(directory)
+      watchers.set(directory, close)
     }
   }
 
-  const removeFor = async (agent: AgentLike): Promise<void> => {
-    const fiber = installs.get(agent)
-    if (fiber === undefined) return
-    installs.delete(agent)
-    try {
-      await fiber.dispose()
-    } catch (error) {
-      ctx.logger.warn(`dsh-agents-toml: failed to remove definitions for one agent: ${String(error)}`)
-    }
+  /** Report each provider that cannot enforce a depth cap, once per process. */
+  const reportDepthless = (provider: string): void => {
+    if (reportedDepthless.has(provider)) return
+    reportedDepthless.add(provider)
+    ctx.logger.warn(
+      `dsh-agents-toml: the subagent provider "${provider}" cannot enforce a depth cap; delegations through it `
+      + 'run without one. Set `max_depth` on a definition to require a cap.',
+    )
   }
 
-  const installFor = async (agent: AgentLike): Promise<void> => {
+  const installFor = async (agent: AgentLike): Promise<InstallationOutcome> => {
     const discovery = await load(agent)
     reportFailures(discovery)
-    ensureWatchers(discovery.watchedDirs)
     const available = discovery.definitions.filter(definition => definition.enabled)
-    if (available.length === 0) return
-    const fiber = agent.ctx.inject(['tools', 'subagents'], (scoped) => {
+    if (available.length === 0) return { watchedDirs: discovery.watchedDirs }
+    const inheriting = new Set<string>()
+    for (const definition of available) {
+      const provider = ctx.subagents.getProvider(definition.provider ?? config.defaultProvider)
+      // A provider that is not registered yet is reported at call time; until
+      // then its definitions are described as non-inheriting.
+      if (provider === undefined) continue
+      if (provider.inheritsParentContext) inheriting.add(definition.name)
+      if (!provider.capabilities.depthLimit && definition.maxDepth === undefined) {
+        reportDepthless(provider.name)
+      }
+    }
+    const fiber = harness.registerToolIn(agent, scoped => {
       scoped.tools.register(buildDelegationTool({
         toolName: config.toolName(),
         defaultProvider: config.defaultProvider,
         reportFailuresToModel: config.reportFailuresToModel(),
         subagents: scoped.subagents,
-        load,
+        hostDepth: () => harness.hostDepth(),
+        load: (caller: AgentLike) => load(caller),
         installedNames: available.map(definition => definition.name),
         installedContinuable: available
           .filter(definition => definition.mode === 'continuable')
           .map(definition => definition.name),
+        installedInheriting: [...inheriting],
         installedFailures: discovery.failures,
       }))
     })
-    installs.set(agent, fiber)
     ctx.logger.info(
       `dsh-agents-toml: installed ${available.length} subagent definition(s) for `
-      + `${agent.session.header.cwd ?? '(no working directory)'} as "${config.toolName()}"`,
+      + `${describe(agent)} as "${config.toolName()}"`,
     )
+    return { fiber, watchedDirs: discovery.watchedDirs }
   }
 
-  const installForSafe = async (agent: AgentLike): Promise<void> => {
-    await removeFor(agent)
-    try {
-      await installFor(agent)
-    } catch (error) {
-      // A definition problem must never reject Agent creation.
-      ctx.logger.warn(`dsh-agents-toml: could not install definitions for one agent: ${String(error)}`)
-    }
+  const install = async (agent: AgentLike): Promise<void> => {
+    await installations.sync(agent, () => installFor(agent))
+    syncWatchers()
+  }
+
+  const remove = async (agent: AgentLike): Promise<void> => {
+    await installations.forget(agent)
+    syncWatchers()
   }
 
   const reinstallAll = async (): Promise<void> => {
-    for (const agent of [...agents]) await installForSafe(agent)
+    for (const agent of [...installations.agents()]) await install(agent)
   }
 
   function scheduleReinstall(): void {
@@ -201,31 +274,21 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
   }
 
   ctx.on('agent/created', async ({ agent }) => {
-    agents.add(agent)
-    await installForSafe(agent)
+    await install(agent)
   })
   ctx.on('agent/disposed', ({ agent }) => {
-    agents.delete(agent)
-    void removeFor(agent)
+    void remove(agent)
   })
 
   // Catch Agents that already exist: a one-shot runner creates its Agent while
   // it activates, which can precede this row's activation.
-  const registry = readAgentRegistry(ctx)
-  if (registry !== undefined) {
-    for (const agent of registry.list()) {
-      agents.add(agent)
-      void installForSafe(agent)
-    }
-  }
+  for (const agent of harness.agents()) void install(agent)
 
-  ctx.effect?.(() => () => {
-    for (const close of watchers.values()) close()
-    watchers.clear()
-    for (const fiber of installs.values()) void fiber.dispose()
-    installs.clear()
-    agents.clear()
+  ctx.effect(() => () => {
+    for (const directory of [...watchers.keys()]) closeWatch(directory)
+    unwatchable.clear()
     if (debounce !== undefined) clearTimeout(debounce)
+    void installations.dispose()
   })
 
   // Surface user-directory problems at load, before any Agent exists.

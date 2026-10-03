@@ -14,8 +14,8 @@ import {
   buildContinuableRequest,
   buildRunRequest,
   capabilityFailure,
+  depthFor,
   describeResult,
-  resolveHostDepth,
 } from './mapping.ts'
 
 /** Everything one installed tool instance needs. */
@@ -26,12 +26,24 @@ export interface DelegationToolOptions {
   /** Whether unavailable definitions are reported in the tool description. */
   readonly reportFailuresToModel: boolean
   readonly subagents: SubagentService
+  /**
+   * The Host's configured delegation depth, read at call time.
+   * @returns the depth, or `undefined` on a runtime without a shared policy.
+   */
+  readonly hostDepth: () => number | undefined
   /** Fresh discovery for the calling Agent, so edited files apply on the next call. */
   readonly load: (agent: AgentLike) => Promise<DiscoveryResult>
   /** Names available when this instance was installed; drives the schema enum. */
   readonly installedNames: readonly string[]
   /** Of those, the ones whose mode starts them in the background. */
   readonly installedContinuable: readonly string[]
+  /**
+   * Of those, the ones whose transport seeds the child with the parent's
+   * completed turns. The provider registry is read at install time; a
+   * definition whose provider is not registered yet counts as not inheriting,
+   * and the call reports the missing provider.
+   */
+  readonly installedInheriting: readonly string[]
   /** Failures known when this instance was installed. */
   readonly installedFailures: readonly DefinitionFailure[]
 }
@@ -89,8 +101,17 @@ function unknownAgentTypeMessage(requested: string, discovery: DiscoveryResult):
 function buildDescription(options: DelegationToolOptions): string {
   const parts = [
     'Delegate a self-contained task to one of the named subagents configured for this user or project, chosen with `agent_type`.',
-    'The subagent works in its own context and returns only its result, so include everything it needs in `prompt`.',
   ]
+  if (options.installedInheriting.length > 0) {
+    // A forking transport seeds the child with the parent's completed turns, so
+    // telling the model the child never sees this conversation would be wrong.
+    parts.push(
+      `A subagent on an inheriting transport (${options.installedInheriting.join(', ')}) already sees this conversation's completed turns; `
+      + 'every other subagent works in its own context, so include everything it needs in `prompt`.',
+    )
+  } else {
+    parts.push('The subagent works in its own context and returns only its result, so include everything it needs in `prompt`.')
+  }
   if (options.installedContinuable.length > 0) {
     // A background child answers through the parent's inbox, so the generic
     // "returns only its result" above would promise an answer this call never
@@ -125,7 +146,7 @@ function buildParameters(names: readonly string[]): Record<string, unknown> {
       },
       prompt: {
         type: 'string',
-        description: 'The complete, self-contained task for the subagent. It does not share this conversation\'s context.',
+        description: 'The complete, self-contained task for the subagent. It works in its own context unless its transport inherits this one.',
       },
     },
     required: ['agent_type', 'description', 'prompt'],
@@ -178,7 +199,7 @@ export function buildDelegationTool(options: DelegationToolOptions): ToolDefinit
       }
 
       exec.signal.throwIfAborted()
-      const maxDepth = definition.maxDepth ?? resolveHostDepth(subagents)
+      const maxDepth = depthFor(definition, provider, options.hostDepth())
       const child = { definition, parent, maxDepth }
 
       if (definition.mode === 'continuable') {
@@ -196,7 +217,10 @@ export function buildDelegationTool(options: DelegationToolOptions): ToolDefinit
         buildRunRequest({ ...child, signal: exec.signal }, prompt, description),
       )
       try {
-        const described = describeResult(await run.result)
+        const described = describeResult(
+          await run.result,
+          { expectStructured: definition.outputSchema !== undefined },
+        )
         if (!described.ok) throw new Error(described.error)
         return { text: described.text }
       } finally {

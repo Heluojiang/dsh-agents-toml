@@ -21,7 +21,7 @@ function definition(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
 }
 
 function discovery(definitions: readonly AgentDefinition[], failures: readonly DefinitionFailure[] = []): DiscoveryResult {
-  return { definitions, failures, userDir: 'C:/home/.dsh/agents', projectRoot: undefined, projectDir: undefined, watchedDirs: [] }
+  return { definitions, failures, userDir: 'C:/home/.dsh/agents', projectRoot: undefined, watchedDirs: [] }
 }
 
 interface Bench {
@@ -41,6 +41,10 @@ function bench(
     readonly abort?: boolean
     readonly toolName?: string
     readonly defaultProvider?: string
+    /** Definition names the install-time snapshot marked as inheriting the conversation. */
+    readonly inheriting?: readonly string[]
+    /** Host depth the installed tool reads at call time; omit for the runtime default. */
+    readonly hostDepth?: () => number | undefined
   } = {},
 ): Bench {
   const fake = createFakeSubagents(
@@ -56,11 +60,13 @@ function bench(
     defaultProvider: options.defaultProvider ?? 'spawn',
     reportFailuresToModel: true,
     subagents: fake.service,
+    hostDepth: options.hostDepth ?? (() => fake.hostDepth()),
     load: () => Promise.resolve(discovery(definitions, options.failures ?? [])),
     installedNames: definitions.filter(entry => entry.enabled).map(entry => entry.name),
     installedContinuable: definitions
       .filter(entry => entry.enabled && entry.mode === 'continuable')
       .map(entry => entry.name),
+    installedInheriting: options.inheriting ?? [],
     installedFailures: options.failures ?? [],
   })
   return { tool, started: fake.started, continuable: fake.continuable, parent, exec: { agent: parent, signal: controller.signal } }
@@ -96,6 +102,16 @@ describe('tool schema', () => {
     const mixed = bench([definition(), definition({ name: 'explorer', mode: 'continuable' })]).tool
     assert.match(mixed.description, /Background subagents \(explorer\) return only a child id/)
     assert.match(mixed.description, /the child's answer does not come back with this call\./)
+  })
+
+  it('describes an inheriting transport as one that already sees the conversation', () => {
+    const ownContext = bench([definition()]).tool
+    assert.match(ownContext.description, /works in its own context/)
+    assert.doesNotMatch(ownContext.description, /already sees this conversation/)
+
+    const inheriting = bench([definition()], { inheriting: ['reviewer'] }).tool
+    assert.match(inheriting.description, /inheriting transport \(reviewer\) already sees this conversation's completed turns/)
+    assert.match(inheriting.description, /works in its own context/)
   })
 
   it('renders the canonical text value', () => {
@@ -193,6 +209,44 @@ describe('delegation', () => {
       () => tool.execute(ARGS, exec),
       /cannot run on provider "codex": child LLM routing is unsupported by this provider/,
     )
+  })
+
+  it('runs an out-of-process definition that asks for no capability, sending no depth cap', async () => {
+    // The Harness rejects any request carrying `maxDepth` on a provider without
+    // `depthLimit`, so a plain definition must not carry the Host's default.
+    const { tool, started, exec } = bench([definition({ provider: 'acp' })], {
+      providers: [{ name: 'acp', capabilities: NO_CAPABILITIES }],
+    })
+    const value = await tool.execute(ARGS, exec)
+    assert.deepEqual(value, { text: 'done' })
+    assert.equal(started.length, 1)
+    assert.equal(started[0]?.request.maxDepth, undefined)
+  })
+
+  it('returns a captured structured result as JSON text', async () => {
+    const { tool, exec } = bench([definition({ outputSchema: { type: 'object' } })], {
+      result: { output: [], structured: { summary: 'ok' }, stopReason: 'completed' },
+    })
+    const value = await tool.execute(ARGS, exec)
+    assert.deepEqual(value, { text: '{\n  "summary": "ok"\n}' })
+  })
+
+  it('says so when a definition asked for a schema and the child produced none', async () => {
+    const { tool, exec } = bench([definition({ outputSchema: { type: 'object' } })], {
+      result: { output: [], structured: undefined, stopReason: 'error' },
+    })
+    await assert.rejects(
+      () => tool.execute(ARGS, exec),
+      /did not complete: error[\s\S]*did not produce a value for output_schema/,
+    )
+  })
+
+  it('keeps the child text when it completed with both a schema value and prose', async () => {
+    const { tool, exec } = bench([definition({ outputSchema: { type: 'object' } })], {
+      result: { output: [{ type: 'text', text: 'note' }], structured: { summary: 'ok' }, stopReason: 'completed' },
+    })
+    const value = await tool.execute(ARGS, exec)
+    assert.deepEqual(value, { text: '{\n  "summary": "ok"\n}\n\nnote' })
   })
 
   it('honours cancellation before starting a child', async () => {

@@ -1,12 +1,19 @@
 /** Plugin orchestration: per-Agent installation, failure visibility, watching. */
 import assert from 'node:assert/strict'
-import { basename, dirname, join, resolve } from 'node:path'
-import { describe, it } from 'node:test'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { afterEach, describe, it } from 'node:test'
 
-import type { DiscoveryIo } from '../src/discovery.ts'
 import type { AgentLike, ToolDefinition } from '../src/host.ts'
-import { createPlugin, type PluginConfig } from '../src/plugin.ts'
-import { createAgent, createFakeContext, createFakeSubagents, FULL_CAPABILITIES, type FakeContext } from './harness.ts'
+import { createPlugin, resolveHomeDir, type PluginConfig } from '../src/plugin.ts'
+import {
+  createAgent,
+  createFakeContext,
+  createFakeSubagents,
+  FULL_CAPABILITIES,
+  MemoryIo,
+  type FakeContext,
+} from './harness.ts'
 
 const ROOT = resolve('fake-plugin-root')
 const HOME = join(ROOT, 'home')
@@ -17,35 +24,26 @@ const PROJECT_DIR = join(PROJECT, '.dsh', 'agents')
 
 const delay = (ms: number): Promise<void> => new Promise(resolveTimer => { setTimeout(resolveTimer, ms) })
 
-/** Mutable in-memory filesystem, so a test can add files while the plugin runs. */
-class MemoryIo implements DiscoveryIo {
-  readonly files = new Map<string, string>()
-  readonly dirs = new Set<string>()
-
-  mkdir(path: string): void {
-    this.dirs.add(resolve(path))
+/**
+ * Wrap an in-memory filesystem so every read yields to the event loop, which is
+ * what lets two installs for one Agent overlap.
+ * @param io - the filesystem to delay.
+ * @returns the yielding delegate.
+ */
+function slowIo(io: MemoryIo): MemoryIo {
+  const yieldTurn = async <T>(work: () => Promise<T>): Promise<T> => {
+    await Promise.resolve()
+    return work()
   }
-
-  write(path: string, text: string): void {
-    const absolute = resolve(path)
-    this.files.set(absolute, text)
-    this.dirs.add(dirname(absolute))
-  }
-
-  listDefinitionFiles(dir: string): Promise<readonly string[]> {
-    const root = resolve(dir)
-    return Promise.resolve(
-      [...this.files.keys()].filter(path => dirname(path) === root).map(path => basename(path)).sort(),
-    )
-  }
-
-  readFile(file: string): Promise<string> {
-    const text = this.files.get(resolve(file))
-    return text === undefined ? Promise.reject(new Error(`ENOENT: ${file}`)) : Promise.resolve(text)
-  }
-
-  isDirectory(path: string): Promise<boolean> {
-    return Promise.resolve(this.dirs.has(resolve(path)))
+  return {
+    files: io.files,
+    dirs: io.dirs,
+    mkdir: path => { io.mkdir(path) },
+    write: (path, text) => { io.write(path, text) },
+    remove: path => { io.remove(path) },
+    listDefinitionFiles: dir => yieldTurn(() => io.listDefinitionFiles(dir)),
+    readFile: file => yieldTurn(() => io.readFile(file)),
+    isDirectory: path => yieldTurn(() => io.isDirectory(path)),
   }
 }
 
@@ -59,6 +57,7 @@ interface Bench {
   readonly io: MemoryIo
   readonly fake: FakeContext
   readonly watches: Watch[]
+  readonly refused: string[]
 }
 
 /** Test-side configuration: a volatile setting may be given as a value or as its accessor. */
@@ -100,17 +99,24 @@ function bench(overrides: ConfigOverrides = {}, debounceMs = 0): Bench {
   const io = new MemoryIo()
   const fake = createFakeContext(createFakeSubagents([{ name: 'spawn', capabilities: FULL_CAPABILITIES }]).service)
   const watches: Watch[] = []
+  const refused: string[] = []
   createPlugin(fake.ctx, config(overrides), {
     io,
     homeDir: HOME,
     debounceMs,
     watchDirectory(dir, onChange) {
+      // A directory that is not there yet has no watch to open, exactly as
+      // `fs.watch` reports: the caller retries on the next install.
+      if (!io.dirs.has(resolve(dir))) {
+        refused.push(dir)
+        return undefined
+      }
       const entry: Watch = { dir, change: onChange, closed: false }
       watches.push(entry)
       return () => { entry.closed = true }
     },
   })
-  return { io, fake, watches }
+  return { io, fake, watches, refused }
 }
 
 function definition(name: string, extra = ''): string {
@@ -121,6 +127,43 @@ function enumOf(tool: ToolDefinition): readonly string[] | undefined {
   const parameters = tool.parameters as { properties: { agent_type: { enum?: string[] } } }
   return parameters.properties.agent_type.enum
 }
+
+describe('resolveHomeDir', () => {
+  const original = process.env['DSH_HOME']
+  afterEach(() => {
+    if (original === undefined) delete process.env['DSH_HOME']
+    else process.env['DSH_HOME'] = original
+  })
+
+  /** @param value - the `DSH_HOME` value to install, or nothing to unset it. */
+  function setHome(value?: string): void {
+    if (value === undefined) delete process.env['DSH_HOME']
+    else process.env['DSH_HOME'] = value
+  }
+
+  it('falls back to ~/.dsh when the variable is absent or blank', () => {
+    setHome(undefined)
+    assert.equal(resolveHomeDir(), resolve(join(homedir(), '.dsh')))
+    // A blank override must never resolve the home to the working directory.
+    setHome('   ')
+    assert.equal(resolveHomeDir(), resolve(join(homedir(), '.dsh')))
+  })
+
+  it('expands a tilde prefix against the OS home', () => {
+    setHome('~/custom-agents')
+    assert.equal(resolveHomeDir(), resolve(join(homedir(), 'custom-agents')))
+  })
+
+  it('resolves a relative path against the working directory', () => {
+    setHome('relative-home')
+    assert.equal(resolveHomeDir(), resolve('relative-home'))
+  })
+
+  it('keeps an absolute path, trailing separator included', () => {
+    setHome('C:/harness-home/')
+    assert.equal(resolveHomeDir(), resolve('C:/harness-home'))
+  })
+})
 
 async function created(fake: FakeContext, cwd = PROJECT): Promise<AgentLike> {
   const agent = createAgent(fake.ctx, cwd)
@@ -237,6 +280,38 @@ describe('createPlugin', () => {
     assert.equal(b.watches.length, 0)
   })
 
+  it('closes watchers already open when watching is turned off', async () => {
+    // The setting is read whenever a watch is opened, and turning it off must
+    // release the watches that are already open rather than wait for a restart.
+    let watching = true
+    const b = bench({ watchDefinitions: () => watching })
+    b.io.mkdir(USER_DIR)
+    b.io.write(join(USER_DIR, 'reviewer.toml'), definition('reviewer'))
+    await created(b.fake)
+    assert.equal(b.watches.length, 1)
+
+    watching = false
+    await created(b.fake)
+    assert.equal(b.watches[0]?.closed, true)
+  })
+
+  it('opens the watch once a missing definition directory appears', async () => {
+    // `fs.watch` reports ENOENT for a directory that does not exist yet, and
+    // caching that attempt as if it were a watch would never observe the
+    // directory that is created next.
+    const b = bench()
+    await created(b.fake)
+    assert.deepEqual(b.refused, [USER_DIR])
+    assert.equal(b.watches.length, 0)
+
+    b.io.mkdir(USER_DIR)
+    b.io.write(join(USER_DIR, 'reviewer.toml'), definition('reviewer'))
+    await created(b.fake)
+    assert.equal(b.watches.length, 1)
+    assert.equal(b.watches[0]?.dir, USER_DIR)
+    assert.equal(b.fake.tools.length, 1)
+  })
+
   it('re-reads the trust setting on every discovery, so a settings write applies without a remount', async () => {
     // The Host keeps one volatile reference per setting and updates it in place
     // when a settings form writes; nothing disposes and re-applies this row.
@@ -267,6 +342,44 @@ describe('createPlugin', () => {
     assert.equal(b.watches.length, 1)
     for (const cleanup of b.fake.cleanups) cleanup()
     assert.equal(b.watches[0]?.closed, true)
+  })
+
+  it('serializes overlapping installs so one registration stays live', async () => {
+    // Agent creation, the watcher, and the activation sweep can all ask for the
+    // same Agent's install at once. Registering twice would be rejected as a
+    // duplicate while the first registration leaked.
+    const io = new MemoryIo()
+    io.mkdir(USER_DIR)
+    io.write(join(USER_DIR, 'reviewer.toml'), definition('reviewer'))
+    const fake = createFakeContext(createFakeSubagents([{ name: 'spawn', capabilities: FULL_CAPABILITIES }]).service)
+    createPlugin(fake.ctx, config(), { io: slowIo(io), homeDir: HOME, debounceMs: 0 })
+    const agent = createAgent(fake.ctx, PROJECT)
+
+    await Promise.all([fake.emitCreated(agent), fake.emitCreated(agent), fake.emitCreated(agent)])
+
+    assert.equal(fake.tools.filter(entry => !entry.disposed).length, 1)
+    assert.equal(fake.tools.filter(entry => entry.disposed).length, fake.tools.length - 1)
+    assert.equal(
+      fake.logs.some(entry => /already registered/.test(entry.message)),
+      false,
+      'a serialized install never collides with itself',
+    )
+  })
+
+  it('registers nothing for an install that resolves after its Agent is disposed', async () => {
+    const io = new MemoryIo()
+    io.mkdir(USER_DIR)
+    io.write(join(USER_DIR, 'reviewer.toml'), definition('reviewer'))
+    const fake = createFakeContext(createFakeSubagents([{ name: 'spawn', capabilities: FULL_CAPABILITIES }]).service)
+    createPlugin(fake.ctx, config(), { io: slowIo(io), homeDir: HOME, debounceMs: 0 })
+    const agent = createAgent(fake.ctx, PROJECT)
+
+    const creating = fake.emitCreated(agent)
+    fake.emitDisposed(agent)
+    await creating
+    await delay(5)
+
+    assert.deepEqual(fake.tools.filter(entry => !entry.disposed), [])
   })
 
   it('serves each Agent from its own working directory', async () => {
