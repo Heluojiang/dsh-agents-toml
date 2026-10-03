@@ -8,10 +8,11 @@ import {
   buildAgentOptions,
   buildContinuableRequest,
   buildRunRequest,
+  CAPABILITY_RULES,
   capabilityFailure,
+  depthFor,
   describeResult,
   outputText,
-  resolveHostDepth,
 } from '../src/mapping.ts'
 import { createAgent, createFakeContext, createFakeSubagents, FULL_CAPABILITIES, NO_CAPABILITIES } from './harness.ts'
 
@@ -130,14 +131,40 @@ describe('buildContinuableRequest', () => {
   })
 })
 
-describe('resolveHostDepth', () => {
-  it('reads the host setting when the runtime exposes it', () => {
-    assert.equal(resolveHostDepth(createFakeSubagents([], { depth: 3 }).service), 3)
+describe('depthFor', () => {
+  it('reads the host setting for a provider that can enforce a cap', () => {
+    assert.equal(depthFor(definition(), provider(), 3), 3)
   })
 
-  it('returns undefined on a runtime without the method', () => {
-    const { resolveMaxDepth: _absent, ...rest } = createFakeSubagents([]).service
-    assert.equal(resolveHostDepth(rest), undefined)
+  it('sends no implicit cap to a provider that cannot enforce one', () => {
+    // The Harness rejects any request carrying `maxDepth` on a provider without
+    // the capability, so an implicit cap must not be sent at all.
+    const outOfProcess = provider({ name: 'codex', capabilities: NO_CAPABILITIES })
+    assert.equal(depthFor(definition(), outOfProcess, 1), undefined)
+  })
+
+  it('keeps an explicit cap, which stays a definition failure on such a provider', () => {
+    const outOfProcess = provider({ name: 'codex', capabilities: NO_CAPABILITIES })
+    const explicit = definition({ maxDepth: 2 })
+    assert.equal(depthFor(explicit, outOfProcess, 1), 2)
+    assert.match(capabilityFailure(explicit, outOfProcess) ?? '', /depth cap/)
+  })
+
+  it('returns undefined on a runtime without the shared depth policy', () => {
+    assert.equal(depthFor(definition(), provider(), undefined), undefined)
+  })
+})
+
+describe('CAPABILITY_RULES', () => {
+  it('reports the first failing rule in table order', () => {
+    const both = definition({ model: 'm', persona: 'p' })
+    assert.match(capabilityFailure(both, provider({ name: 'codex', capabilities: NO_CAPABILITIES })) ?? '', /child LLM routing/)
+  })
+
+  it('lists every rule id the documentation table repeats', () => {
+    assert.deepEqual(CAPABILITY_RULES.map(rule => rule.id), [
+      'agentOptions', 'persona', 'toolFilter', 'depthLimit', 'outputSchema', 'outputSchemaOneShot', 'continuable',
+    ])
   })
 })
 
