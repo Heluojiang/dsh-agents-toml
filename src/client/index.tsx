@@ -16,7 +16,6 @@
  * CommonJS file, which `scripts/build-client.mjs` wraps in the loader handoff.
  */
 
-import { useId } from 'react'
 import {
   SettingsForm, SettingsFormModel, SettingsValueField, Switch, settingsTextField,
   type SettingsFieldSpec, type SettingsFieldState, type SettingsFormActions,
@@ -48,21 +47,23 @@ export const NS = 'settings.dsh-agents-toml'
  */
 export const inject = ['slots', 'locale', 'configForms', 'remote', 'remote.pluginManager']
 
+/** The fields the Host serves for this entry, in render order. */
+export const SETTINGS_FIELDS = [
+  'trustProjectAgents',
+  'toolName',
+  'watchDefinitions',
+  'reportFailuresToModel',
+] as const
+
+/** One served settings field. */
+type ServedField = typeof SETTINGS_FIELDS[number]
+
 /** Settings the Host serves for this entry. */
-interface AgentTomlSettings {
-  trustProjectAgents: boolean
-  toolName: string
-  watchDefinitions: boolean
-  reportFailuresToModel: boolean
-}
+type AgentTomlSettings = Record<ServedField, boolean | string>
 
 /** Effective values and drafts the card renders. */
-interface CardState extends SettingsFormShell {
-  trustProjectAgents: SettingsFieldState
-  toolName: SettingsFieldState
-  watchDefinitions: SettingsFieldState
-  reportFailuresToModel: SettingsFieldState
-}
+type CardState = SettingsFormShell & Record<ServedField, SettingsFieldState>
+
 
 /** Whether this profile runs Agent Teams, and whether the operator closed the warning. */
 interface TeamWarningState {
@@ -72,7 +73,7 @@ interface TeamWarningState {
   dismissed: boolean
 }
 
-/** The unsupported-combination warning the card shows and can close. */
+/** The warning projection both the card face and its props carry. */
 interface TeamWarningFace {
   hooks: {
     /** Warning projection the renderer binds to `useTeamWarning`. */
@@ -83,11 +84,9 @@ interface TeamWarningFace {
 
 /** Data and callbacks the card's slot entry injects. */
 interface CardFace extends SettingsFormActions, TeamWarningFace {
-  hooks: {
+  hooks: TeamWarningFace['hooks'] & {
     /** Card projection the renderer binds to `useCard`. */
     card: SnapshotStore<CardState>
-    /** Warning projection the renderer binds to `useTeamWarning`. */
-    teamWarning: SnapshotStore<TeamWarningState>
   }
 }
 
@@ -157,24 +156,6 @@ const en: Record<LocaleKey, string> = {
   saving: 'Saving…',
 }
 
-/**
- * A switch field: the Host resolves the schema default, so an absent stored
- * value still renders as the value the plugin runs with.
- * @param field - field name inside the entry's section.
- * @returns the field's conversion spec.
- */
-function booleanField(field: string): SettingsFieldSpec {
-  return {
-    field,
-    format: value => (value === true ? 'true' : 'false'),
-    parse: (text) => {
-      if (text === 'true') return { kind: 'set', value: true }
-      if (text === 'false') return { kind: 'set', value: false }
-      return undefined
-    },
-  }
-}
-
 /** Bind this plugin's four served fields to one staged settings form. */
 class AgentTomlCardController {
   private readonly form: SettingsFormModel<AgentTomlSettings>
@@ -182,19 +163,12 @@ class AgentTomlCardController {
 
   /** @param scope - the Host's form for this profile entry. */
   constructor(scope: SettingsFormScope<AgentTomlSettings>) {
-    this.form = new SettingsFormModel(scope, [
-      booleanField('trustProjectAgents'),
-      settingsTextField('toolName'),
-      booleanField('watchDefinitions'),
-      booleanField('reportFailuresToModel'),
-    ])
-    this.store = this.form.bind(() => ({
-      ...this.form.shell(),
-      trustProjectAgents: this.form.field('trustProjectAgents'),
-      toolName: this.form.field('toolName'),
-      watchDefinitions: this.form.field('watchDefinitions'),
-      reportFailuresToModel: this.form.field('reportFailuresToModel'),
-    }))
+    this.form = new SettingsFormModel(scope, SETTINGS_FIELDS.map(specFor))
+    this.store = this.form.bind(() => {
+      const fields = {} as Record<ServedField, SettingsFieldState>
+      for (const field of SETTINGS_FIELDS) fields[field] = this.form.field(field)
+      return { ...this.form.shell(), ...fields }
+    })
   }
 
   /**
@@ -204,7 +178,7 @@ class AgentTomlCardController {
    */
   inject(team: TeamWarningFace): CardFace {
     return {
-      hooks: { card: this.store, teamWarning: team.hooks.teamWarning },
+      hooks: { card: this.store, ...team.hooks },
       dismissTeamWarning: team.dismissTeamWarning,
       ...this.form.actions(),
     }
@@ -213,6 +187,25 @@ class AgentTomlCardController {
   /** Release accepted-value subscriptions. */
   dispose(): void {
     this.form.dispose()
+  }
+}
+
+/**
+ * The conversion spec for one served field: a switch is a boolean spelled
+ * `true`/`false`, the tool name is free text.
+ * @param field - one of {@link SETTINGS_FIELDS}.
+ * @returns the field's conversion spec.
+ */
+function specFor(field: ServedField): SettingsFieldSpec {
+  if (field === 'toolName') return settingsTextField(field)
+  return {
+    field,
+    format: value => (value === true ? 'true' : 'false'),
+    parse: (text) => {
+      if (text === 'true') return { kind: 'set', value: true }
+      if (text === 'false') return { kind: 'set', value: false }
+      return undefined
+    },
   }
 }
 
@@ -290,7 +283,6 @@ function AgentTomlCard(props: CardProps) {
   const { t } = props
   const state = props.useCard(snapshot => snapshot)
   const warning = props.useTeamWarning(snapshot => snapshot)
-  const sectionId = useId()
   if (props.view === 'summary') return <>{t('description')}</>
   const disabled = !state.writable || state.saving
   return (
@@ -317,20 +309,20 @@ function AgentTomlCard(props: CardProps) {
             />
           )
           : null}
-        <SwitchRow id={`${sectionId}-trust`} label={t('trustLabel')} help={t('trustHelp')}
+        <SwitchRow id="trustProjectAgents" label={t('trustLabel')} help={t('trustHelp')}
           checked={state.trustProjectAgents.text === 'true'} disabled={disabled}
           onChange={next => { props.edit('trustProjectAgents', next ? 'true' : 'false') }} />
-        <SettingsValueField id={`${sectionId}-tool-name`} label={t('toolNameLabel')}
+        <SettingsValueField id="toolName" label={t('toolNameLabel')}
           help={{ label: t('toolNameLabel'), content: <p>{t('toolNameHelp')}</p> }}
           overriddenLabel={t('overridden')} resetLabel={t('reset')} invalidLabel={t('invalid')}
           disabled={disabled} text={state.toolName.text} overridden={state.toolName.overridden}
           invalid={state.toolName.invalid}
           onEdit={text => { props.edit('toolName', text) }}
           onReset={() => { props.resetField('toolName') }} />
-        <SwitchRow id={`${sectionId}-watch`} label={t('watchLabel')} help={t('watchHelp')}
+        <SwitchRow id="watchDefinitions" label={t('watchLabel')} help={t('watchHelp')}
           checked={state.watchDefinitions.text === 'true'} disabled={disabled}
           onChange={next => { props.edit('watchDefinitions', next ? 'true' : 'false') }} />
-        <SwitchRow id={`${sectionId}-report`} label={t('reportLabel')} help={t('reportHelp')}
+        <SwitchRow id="reportFailuresToModel" label={t('reportLabel')} help={t('reportHelp')}
           checked={state.reportFailuresToModel.text === 'true'} disabled={disabled}
           onChange={next => { props.edit('reportFailuresToModel', next ? 'true' : 'false') }} />
       </div>
@@ -348,9 +340,6 @@ function AgentTomlCard(props: CardProps) {
  * module table, and the build rejects a relative require.
  */
 
-/** The optional bundle that turns Agent Teams on. */
-const AGENT_TEAM_BUNDLE = '@deepseek-ai/dsh-experimental-agent-team-profile'
-
 /**
  * Team rows that mean the same conflict when enabled: a profile can carry them
  * without the bundle, and any other bundle mounting these modules breaks the
@@ -361,7 +350,11 @@ const AGENT_TEAM_MODULES: readonly string[] = [
   '@deepseek-ai/dsh-experimental-tool-agent-team',
 ]
 
-/** Bundle names that are an Agent Teams pack, first-party or not. */
+/**
+ * Bundle names that are an Agent Teams pack, first-party or not. This also
+ * matches `@deepseek-ai/dsh-experimental-agent-team-profile`, the official one,
+ * so it needs no separate name comparison.
+ */
 const AGENT_TEAM_NAME = /(?:^|[/@-])agent-team(?:-profile)?$/u
 
 /**
@@ -393,8 +386,7 @@ function detectAgentTeam(
   bundles: readonly AgentTeamBundle[],
   plugins: readonly AgentTeamPlugin[],
 ): boolean {
-  return bundles.some(bundle => bundle.enabled
-    && (bundle.name === AGENT_TEAM_BUNDLE || AGENT_TEAM_NAME.test(bundle.name)))
+  return bundles.some(bundle => bundle.enabled && AGENT_TEAM_NAME.test(bundle.name))
     || plugins.some(plugin => plugin.enabled && AGENT_TEAM_MODULES.includes(plugin.moduleName))
 }
 
@@ -411,29 +403,42 @@ function storage(): Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | undefi
 }
 
 /**
+ * Run one operation on the browser store, reporting failures through `fallback`.
+ *
+ * Storage fails in three ways that all cost only the remembered dismissal: a
+ * browser policy refuses access, the API is absent, or the quota is exhausted.
+ * @param use - the operation to run against the store.
+ * @param fallback - the value returned when no operation could run.
+ * @returns the operation's value, or the fallback.
+ */
+function withStorage<T>(
+  use: (store: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>) => T,
+  fallback: T,
+): T {
+  try {
+    const store = storage()
+    return store === undefined ? fallback : use(store)
+  } catch (_unavailable) {
+    return fallback
+  }
+}
+
+/**
  * Read the stored dismissal.
  * @returns whether the operator closed the warning in this browser.
  */
 function readWarningDismissed(): boolean {
-  return storage()?.getItem(WARNING_KEY) === '1'
+  return withStorage(store => store.getItem(WARNING_KEY) === '1', false)
 }
 
 /** Remember that the operator closed the warning in this browser. */
 function writeWarningDismissed(): void {
-  try {
-    storage()?.setItem(WARNING_KEY, '1')
-  } catch (_unavailable) {
-    // A blocked or full store only costs one extra showing of the warning.
-  }
+  withStorage(store => { store.setItem(WARNING_KEY, '1') }, undefined)
 }
 
 /** Forget the dismissal, so a later Agent Teams enablement warns again. */
 function clearWarningDismissed(): void {
-  try {
-    storage()?.removeItem(WARNING_KEY)
-  } catch (_unavailable) {
-    // A blocked store keeps the flag; the warning then stays closed.
-  }
+  withStorage(store => { store.removeItem(WARNING_KEY) }, undefined)
 }
 
 /** Shell services this half reaches; the browser context is structural here. */
@@ -445,7 +450,6 @@ interface ClientContext {
    */
   effect(callback: () => (() => void) | void, description: string): void
   locale: {
-    bind(namespace: string): (key: LocaleKey) => string
     register(namespace: string, dictionaries: { zh: Record<LocaleKey, string>; en: Record<LocaleKey, string> }): () => void
   }
   configForms: {

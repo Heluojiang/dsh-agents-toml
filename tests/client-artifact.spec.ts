@@ -371,14 +371,12 @@ test('the module exports the plugin protocol the shell loads', { skip: artifact 
   assert.equal(typeof observed.module.apply, 'function')
 })
 
-test('the manifest name is the row name, the loader id, and the config key', { skip: artifact === undefined }, () => {
-  assert.ok(artifact !== undefined)
+test('the manifest name is the row name', { skip: artifact === undefined }, () => {
   const row = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
-  // A row naming a package the manifest does not declare fails to import, and a
-  // keyed config registration that disagrees with the package name never
-  // renders on the bundle's page.
+  // A row naming a package the manifest does not declare fails to import. The
+  // loader id and the config key are asserted where the artifact is evaluated;
+  // this test owns the patch half of the same identity.
   assert.match(row, new RegExp(`name: '${PACKAGE_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`))
-  assert.match(artifact, new RegExp(`window\\.__ModuleLoader__\\.load\\(\\{ id: ${JSON.stringify(PACKAGE_NAME)}, factory:`))
 })
 
 test('apply registers dictionaries, the served form, and one bundle-page section', { skip: artifact === undefined }, async () => {

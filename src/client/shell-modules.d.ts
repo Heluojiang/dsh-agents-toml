@@ -8,11 +8,6 @@
  * emitted artifact codes against.
  */
 
-declare module 'react' {
-  /** Stable identifier for accessibility wiring within one render. */
-  export function useId(): string
-}
-
 declare module 'react/jsx-runtime' {
   /**
    * Create one element with a static children list.
