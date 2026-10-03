@@ -7,7 +7,7 @@
 - **失败互不牵连**：某个定义写错或用了当前 provider 不支持的能力时，只有该定义不可用（日志 + 工具描述说明原因），其余照常，且**绝不会导致 Agent 创建失败**。
 - **热生效**：定义文件在每次委派时重新读取；目录 watcher 让模型看到的 `agent_type` 列表同步刷新。
 
-**文档导航**：[安装](#安装) · [不支持与智能体团队组合](#与智能体团队agent-teams不支持组合使用) · [插件设置项](#插件设置项) · [用自然语言创建定义](#用自然语言创建定义内置-skill) · [插件行配置](#插件行配置通常无需手改) · [TOML 字段参考](#toml-字段参考) · [常见误解](#常见误解) · [AI 代写提示词注意](#写-persona-时的要求决定父会话能拿到什么) · [示例定义](guide/explorer.toml) · [技术文档](guide/technical.md) · [开关场景讲解](guide/settings-explained.md)
+**文档导航**：[安装](#安装) · [不支持与智能体团队组合](#与智能体团队agent-teams不支持组合使用) · [插件设置项](#插件设置项) · [用自然语言创建定义](#用自然语言创建定义内置-skill) · [插件行配置](#插件行配置通常无需手改) · [TOML 字段参考](#toml-字段参考) · [常见误解](#常见误解) · [AI 代写提示词注意](#写-persona-时的要求决定父会话能拿到什么) · [DSH 升级时看这里](#边界与演进dsh-升级时看这里) · [示例定义](guide/explorer.toml) · [技术文档](guide/technical.md) · [开关场景讲解](guide/settings-explained.md)
 
 ## 安装
 
@@ -80,10 +80,21 @@ dsh web --patch ./dev.patch.yml
 | 动作 | 开启 HMR 的 profile（`web` 默认） | 关闭 HMR 的 profile（`headless` / `sdk` / `acp` / `sdk-minimal`） |
 |---|---|---|
 | 安装/卸载本插件 bundle | 不需要重启（DSH 监听 profile 的 `package.json` 与 patch 文件） | 需要重启 |
-| 新增/修改 `*.toml` 定义 | 不需要重启（下次调用即生效；watcher 刷新工具 schema） | 同左 |
-| 在**插件设置项**里改配置 | 不需要重启：volatile 引用原地更新，下一次委派即生效（仅 `agent_type` 列表要等下一次安装） | 不适用（无 GUI） |
+| 新增/修改 `*.toml` 定义 | 不需要重启：每次委派都重读文件，**下一个模型请求**就能用新定义（监听开着时 `agent_type` 列表也在此时刷新） | 同左 |
+| 在**插件设置项**里改配置 | 不需要重启，但四个键的生效点不同，见下表 | 不适用（无 GUI） |
 | 手改 `cordis.patch.yml` | 不需要重启（补丁文件被监听，该行重载） | 需要重启 |
 | 升级本插件版本（含客户端半边） | Host 模块不热替换，建议重启；刷新浏览器会重新拉取 `lib/client.js` | 需要重启 |
+
+四个设置项各自的生效方式（这是最容易误判的一处）：
+
+| 设置项 | 写入后什么时候生效 |
+|---|---|
+| 信任项目级定义 `trustProjectAgents` | 生效于**下一次委派**：每次发现定义时都会读取 |
+| 监听定义目录 `watchDefinitions` | 立即：关掉会**关闭已打开的目录监听**，打开会在下一次安装时重新打开 |
+| 工具名 `toolName` | 生效于**下一次安装**（新任务/新会话）。已在运行的会话手里仍是旧名字，直到该 Agent 重装 |
+| 列出不可用定义 `reportFailuresToModel` | 同上，生效于下一次安装 |
+
+> 换句话说：`trustProjectAgents` 决定"调用时读什么"，`watchDefinitions` 决定"模型看到的列表是否自动刷新"，另外两项决定"模型看到的工具长什么样"。保存本身会写入 profile 补丁，因此改动不会丢。
 
 ## 与智能体团队（Agent Teams）不支持组合使用
 
@@ -199,7 +210,7 @@ if (-not (Test-Path $manifest)) {
 | `reportFailuresToModel` | `true` | 在工具描述里列出不可用定义及原因 | ✅ |
 | `defaultProvider` | `spawn` | 定义未写 `provider` 时使用的传输 | ❌ 手改 |
 | `projectAgentsDir` | `.dsh/agents` | 项目内的相对目录 | ❌ 手改 |
-| `userAgentsDir` | 未设置（`$DSH_HOME/agents`） | 覆盖用户级定义目录（绝对路径） | ❌ 手改 |
+| `userAgentsDir` | 未设置（`$DSH_HOME/agents`） | 覆盖用户级定义目录（绝对路径）；**仅在该行加载时读取**，改后要重载该行 | ❌ 手改 |
 
 手改时的完整写法（patch 是整段替换 `config`，但没写的键会由 schema 默认值补齐，所以只写要改的项即可）：
 
@@ -212,7 +223,7 @@ if (-not (Test-Path $manifest)) {
     # userAgentsDir: 'D:/my/agents'   # 例：把用户目录放到别处
 ```
 
-`$DSH_HOME` 解析：环境变量 `DSH_HOME`（去空白后非空）优先，否则 `~/.dsh`。
+`$DSH_HOME` 解析与 Harness 一致：环境变量 `DSH_HOME`（去空白后非空）优先，否则 `~/.dsh`；开头的 `~`、`~/`、`~\` 按操作系统主目录展开，最终解析为绝对路径。
 
 ## TOML 完整示例
 
@@ -260,8 +271,8 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 | `reasoning_effort` | 否 | string | 同上 | 推理档位；需要 `agentOptions` |
 | `max_tokens` | 否 | 正整数 | 同上 | 生成长度上限；需要 `agentOptions` |
 | `persona` | 否 | 非空 string（多行用 `"""`） | 部署 persona | 只作用于该子代理；需要 `persona` |
-| `max_depth` | 否 | 整数 ≥ 1 | Host `subagent.maxDepth`（默认 1） | 本定义创建出的子代理的**绝对深度**上限；需要 `depthLimit` |
-| `output_schema` | 否 | TOML 表（对象根 JSON Schema） | — | 子代理返回结构化结果；需要 `outputSchema`，**且只能配 `one-shot`** |
+| `max_depth` | 否 | 整数 ≥ 1 | Host `subagent.maxDepth`（默认 1） | 本定义创建出的子代理的**绝对深度**上限；需要 `depthLimit`。**不写时：provider 支持 `depthLimit` 才下发 Host 深度，不支持则本次委派不下发上限**（见下） |
+| `output_schema` | 否 | TOML 表（对象根 JSON Schema） | — | 子代理返回结构化结果；需要 `outputSchema`，**且只能配 `one-shot`**。成功时父会话收到的是**该 schema 的 JSON 文本** |
 | `tools` | 否 | 表，子键 `allow` / `deny`（非空字符串数组） | 不限制 | 从子代理提示词移除**且**拒绝执行；需要 `toolFilter`。名字必须是本部署真实注册的工具 |
 
 键名允许用 `-` 代替 `_`（`llm-provider` ≡ `llm_provider`、`max-depth` ≡ `max_depth`）。**未知键与类型错误一律报错**，不会被静默忽略。
@@ -277,11 +288,24 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 | `output_schema` | `outputSchema` | `spawn`、`fork`（且仅 `one-shot`） |
 | `mode = "continuable"` | `prepareContinuable` | `spawn`、`fork` |
 
-`acp` / `codex` / `claude-code` 不声明任何启动能力，因此把上述字段用在它们身上会让**该定义**失败。两类失败的时机不同，别混淆：
+`acp` / `codex` / `claude-code` 不声明任何启动能力。**只要定义里没写上表任何能力字段，这些 provider 照常可用**；一旦写了，失败时机分两类：
 
 - **解析期失败（文件写错）**：必填缺失、类型错误、未知键、`max_depth = 0`、`[tools]` 出现非 `allow`/`deny` 的键 —— 定义直接判失败并给出原因。
 - **调用期失败（能力不匹配）**：provider 是否具备某项能力只有在委派那一刻才能确定，因此报错形如
   `subagent "x" cannot run on provider "codex": child LLM routing is unsupported by this provider`。
+
+### `max_depth` 不写时会发生什么（容易踩的一处）
+
+Host 的深度是**绝对深度上限**，而 Harness 规定：请求里带 `maxDepth` 就必须由具备 `depthLimit` 的 provider 执行，否则整次调用被拒（官方工具为此提供了 `maxDepth: 'provider-managed'`）。因此本插件的规则是：
+
+| 定义 | provider 有 `depthLimit` | 结果 |
+|---|---|---|
+| 写了 `max_depth` | 有 | 按该值下发 |
+| 写了 `max_depth` | 无 | **调用期报错**（`an explicit depth cap is unsupported by this provider`），与上表一致 |
+| 没写 `max_depth` | 有 | 下发 Host 的 `subagent.maxDepth`（默认 1） |
+| 没写 `max_depth` | 无 | **不下发上限**，本次委派没有深度限制；Host 日志会为该 provider 记一条 warn |
+
+也就是说：想让某个 provider 上**一定**有上限，就在定义里写 `max_depth`（代价是该 provider 必须支持 `depthLimit`）。
 
 ### 继续一个 continuable 子代理（依赖官方控制工具）
 
@@ -322,13 +346,22 @@ deny = ["write", "edit"]         # 名字必须是本部署真实注册的工具
 **误解 3：装了 Agent Teams 就不能用本插件了，或者装了就收不到子代理结论。**
 本插件的 `agent_type` 委派直接调用 `ctx.subagents.start()` / `startContinuable()`，与官方 `tool-subagent*` 无关，所以**委派本身照常可用**；**结算通知也照常投递**（它由续接管理器发出，团队组合包只禁用四个工具行）。但官方**不支持**这个组合使用方式：被 Agent Teams 替换掉的正是"官方直连委派"那一路 —— 父代理续聊 continuable 子代理的控制工具、`list_agents`（变成列队友）、以及官方 `subagent` / `subagent_fork` 工具本身。因此本插件**不推荐**、也不支持与它同时启用；设置页检测到团队开启时会显示红色提示（提示框自身可关闭；**关闭团队仍需你自己在插件页操作，本插件不会代为改动 profile**），完整说明见[与智能体团队（Agent Teams）不支持组合使用](#与智能体团队agent-teams不支持组合使用)。
 
+### `output_schema` 的返回值长什么样
+
+配了 `output_schema` 的 `one-shot` 定义，父会话**收到的是符合该 schema 的 JSON 文本**（缩进两格）。这一点值得单独说明，因为 Harness 会给这类子代理下一条硬指令（`When you have your final answer, you MUST report it by calling the structured_output tool… Do not finish with a plain text answer`）：子代理的最终文本**通常是空的**，真正的结论在结构化值里。所以：
+
+- 成功时：工具返回值就是那段 JSON，不会再出现"(the subagent finished without a text answer)"这种占位句；
+- 如果子代理同时留了文本，文本会附在 JSON 之后（中间空一行），两条信息都不丢；
+- 子代理跑完却没有产出符合 schema 的值时，错误里会明确写出 `the child did not produce a value for output_schema`，而不是让它看起来像模型崩了；
+- 想要 JSON 之外的**散文结论**，就在 `persona` 里另外要求它交一段总结文本（上面那条指令并不禁止追加文本）。
+
 ### 写 `persona` 时的要求（决定父会话能拿到什么）
 
 `persona` 是子代理的系统提示，**父会话最终收到什么，由它决定**。让 AI 代写定义时，最容易在这里出问题：
 
 | 你选的 `mode` | 父会话拿到什么 | `persona` 必须写清的 |
 |---|---|---|
-| `one-shot` | 工具调用的返回值 = 子代理最终文本 | 报告什么、什么顺序、什么算证据 |
+| `one-shot` | 工具调用的返回值 = 子代理最终文本（配了 `output_schema` 时改为那段 JSON） | 报告什么、什么顺序、什么算证据 |
 | `continuable` | 先拿到子代理 id；收尾时收到**结算通知**，里面只有子代理**最后一条消息的文本** | **要求它把结论写在收尾消息里**（研究发现 + 证据 + 未解决问题），不要只回"完成"；中途必须让父会话知道的发现，再要求它用 `send_message(agent_id = 父代理 id)` 提前发出 |
 
 两种模式都不要把**本次任务**写进 `persona`（任务由调用方的 `prompt` 传入），也不要重复调用方已有的规则；`persona` 只写角色、边界和汇报格式。
@@ -380,8 +413,22 @@ known global tools: create_goal, edit, …, pwsh, read, write
 
 ```sh
 npm install
-npm run check     # 两个编译面类型检查 + 文档链接检查 + 单测
-npm run build     # 产出 lib/*.js、lib/types/*.d.ts 与 lib/client.js
+npm run check          # 两个编译面类型检查 + 文档链接检查 + 单测
+npm run check:harness  # 用已安装的 DSH 校验本插件依赖的声明是否还在（见下）
+npm run build          # 产出 lib/*.js、lib/types/*.d.ts 与 lib/client.js
 ```
 
 测试完全不依赖 DSH 安装，也不读写真实 `$DSH_HOME`。细节与覆盖范围见 [技术文档 · 测试](guide/technical.md#13-测试与构建)。
+
+## 边界与演进（DSH 升级时看这里）
+
+本插件**不 import 任何 `@deepseek-ai/dsh-*` 包**：它只通过 `src/host.ts` 里的结构性类型调用 Harness 的服务，因此发布包的版本落后于运行时也不会把它锁死。代价是"声明被改名"这类变化编译器不会发现，所以有一个专门的检查：
+
+```sh
+npm run check:harness                              # 自动解析已安装的 @deepseek-ai/dsh
+DSH_SHAPE_ROOT=<node_modules> npm run check:harness  # 指定别的安装位置
+```
+
+它会逐条读取已安装包的声明文件，核对本插件用到的每个名字（`subagents.start` / `startContinuable` / `getProvider` / `resolveMaxDepth`、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` 等），任何一条消失就打印 `DRIFT` 并以非零码退出，指明要改哪个模块（`src/host.ts`、`src/harness.ts`、客户端半边）。它**不在 `npm test` 里**，因为单测刻意不需要 DSH 环境。
+
+`src/harness.ts` 是全项目唯一做能力探测的地方：composition 缺少某个可选服务时（Agent 注册表、共享深度策略、技能注册表），它会**在加载时明确告知缺什么、会少哪个功能**，而不是在用到时才静默降级。

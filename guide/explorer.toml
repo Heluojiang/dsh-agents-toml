@@ -47,6 +47,9 @@ model = "deepseek-v4-flash"
 # [可选] 省略则取 Host 的 subagent.maxDepth（通常为 1）。
 #        语义：约束"本定义创建出的子代理"的绝对深度 —— 1 = 允许本次委派，但它不能再往下委派。
 #        0 永远不成立（子代理深度至少为 1），因此在解析期就判失败。
+#        注意：Harness 要求"请求里带 maxDepth 就必须由具备 depthLimit 的 provider 执行"，
+#        所以本插件只在 provider 支持 depthLimit 时才下发 Host 的隐式上限；写了本行则一定下发，
+#        在不支持的 provider（如 acp/codex）上会明确报"不支持深度上限"。
 max_depth = 1
 
 # [可选] 从子代理的提示词里移除并拒绝执行这些工具（只能做减法，需要 provider 能力 toolFilter）。

@@ -119,9 +119,9 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 |---|---|---|
 | `agent_type` | string（枚举 = 当前可用定义名） | 选哪个子代理 |
 | `description` | string | 3–5 词标签；同时作为子代理的 durable label |
-| `prompt` | string | 自包含任务说明（子代理不共享本会话上下文） |
+| `prompt` | string | 自包含任务说明（子代理默认在自己的上下文里工作；`fork` 这类继承父级已完成轮次的传输除外，工具描述会区分） |
 
-工具描述包含：用途说明 + `Configured subagents: a, b.` + 可选 `Unavailable definitions: name (原因).`
+工具描述包含：用途说明 + 传输是否继承上下文的说明 + `Configured subagents: a, b.` + 可选的 continuable 提示与 `Unavailable definitions: name (原因).`。「是否继承上下文」由安装期读取 provider 的 `inheritsParentContext` 决定（provider 尚未注册时按不继承计），因此同一次安装里的两类传输不会被一句笼统的措辞覆盖。
 
 ### 5.2 调用语义
 
@@ -129,11 +129,11 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 2. **重新读取定义**（热生效）→ 按名查找启用的定义；找不到时给出可用名单，命中失败定义时给出原因。
 3. 选 provider（定义的 `provider` 或 `defaultProvider`）→ 未注册则列出已注册 provider。
 4. 能力位校验（见第 9 节）→ 不匹配则报明确原因。
-5. 解析深度：定义 `max_depth` 优先，否则读 Host 设置。
+5. 解析深度策略（`depthFor`）：定义写了 `max_depth` 就原样下发；否则**仅当 provider 具备 `depthLimit`** 时才下发 Host 的 `subagent.maxDepth`，否则不下发并记一条 warn（原因见第 9 节末）。
 6. 检查取消信号 → 分派：
    - `one-shot`：`ctx.subagents.start(provider, request)` → 等 `result` → **总是 dispose**；
    - `continuable`：`ctx.subagents.startContinuable({provider, label, request, signal})` → 返回 `started subagent <childId>`。该 Promise 在**入队被接受**时就 resolve（不等待子代理开跑或落盘），措辞与官方 `subagent` 工具在 continuable 下逐字一致 —— **结论不在本次返回值里**。子代理结算时由 `dsh-subagent` 的续接管理器 `notifySettlement()` 向父会话投递一条 user 消息：开头是结局句（`Background subagent <id> finished and will do no further work unless you send it more.`，另有 stopped / ran out of room / declined / failed 四种），随后是子代理**最终 assistant 输出中的非空文本块**（无非空文本时写 `It left no closing message.`）；该投递是**无条件**的（只要调用方拿到过 id），父会话空闲会被唤醒，且**不受 Agent Teams 影响**。不回传的是中间过程（工具输出、推理、中途文本），那些靠 `send_message` 往返；续聊（steer / wake / 冷启动）属于官方 `dsh-tool-subagent-control`，本插件不重复实现。
-7. 结果映射：`completed` → 返回子代理最终文本（无文本时给占位句）；非 `completed` → 工具报错，内容是 `the subagent did not complete: <stopReason>` + 提供方诊断 + 部分输出。
+7. 结果映射（`describeResult`）：捕获到结构化值 → 返回该值的 JSON 文本（子代理同时留了文本时附在其后，中间空一行）；否则 `completed` → 返回最终文本（无文本时给占位句）；非 `completed` → 工具报错，内容是 `the subagent did not complete: <stopReason>` + 提供方诊断 + 部分输出。定义配了 `output_schema` 却没拿到值时，错误里补一句 `the child did not produce a value for output_schema`（Harness 会把这类"跑完但没交值"改写成 `stopReason: error`，不补这句会看起来像模型崩了）。
 
 委派不修改父会话，因此声明为并发安全（`isConcurrencySafe: () => true`）。
 
@@ -145,9 +145,11 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
   ├─ 读取 ctx.get('agents').list() → 为"激活前已存在"的 Agent 补装
   └─ 订阅 agent/disposed → 释放该 Agent 的工具
 安装 = agent.ctx.inject(['tools','subagents'], ctx => ctx.tools.register(tool))
-卸载 = ctx.effect(...) 关闭 watcher + 释放全部 fiber
+卸载 = ctx.effect(...) 关闭 watcher + 释放全部注册
 ```
 
+- **每个 Agent 的安装串行化**（`src/installation.ts`）：`agent/created`、目录 watcher、激活期补装三处都可能同时为同一个 Agent 触安装。安装链保证前一步结束才开始下一步，且**卸载后落地的安装不再注册**。没有这层顺序时，两次重叠安装会先后注册同名工具，第二次被注册表按"already registered in this scope"拒绝，第一次的注册则泄漏。
+- **watcher 随需求增减**：期望集合 = 所有存活安装当前需要的目录之并，每次安装/释放后重新对齐。因此关掉 `watchDefinitions` 会**关闭已打开的监听**；目录当时不存在（`fs.watch` 抛 `ENOENT`）**不会被记成"已监听"**，下一次安装会重试。
 - **为什么需要"补装"**：一次性运行（headless）在**插件激活期间**就创建了 Agent，`agent/created` 已经错过；这与官方 `tool-subagent` 的 `reconcileComposedAgents()` 同构。
 - **失败隔离**：安装过程中的任何异常都只记 warn，**不会 reject Agent 创建**。
 - 不同项目 → 不同 Agent → 不同定义集，互不影响。
@@ -167,25 +169,25 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 | 变更 | 是否需要重启 |
 |---|---|
 | 增删改 `*.toml` | **不需要**：调用时重读；`watchDefinitions` 开启时枚举同步刷新（防抖 200ms） |
-| 关闭 `watchDefinitions` | 新名字要等该 Agent 下次创建才进枚举，但直接调用新名字仍即时生效 |
-| 插件页设置项写入 | **不需要**：写入 profile 补丁的同时原地更新 volatile 引用，该行不重载，下一次委派即生效 |
+| 关闭 `watchDefinitions` | **立即**关闭已打开的目录监听；此后新名字要等该 Agent 下次创建才进枚举，但直接调用新名字仍即时生效 |
+| 插件页设置项写入 | **不需要**：写入落到 profile 补丁。四个键的生效点不同——`trustProjectAgents` 每次发现定义时读取（下一次委派即生效）；`watchDefinitions` 立即生效；`toolName` 与 `reportFailuresToModel` 在下一次安装（新任务/新会话）时读取 |
 | 手改 `cordis.patch.yml` | 开启 HMR 的 profile 会重载该行；关闭 HMR 的 profile 需要重启 |
 | 安装/卸载插件 bundle | web profile（默认开 HMR）不需要重启；HMR 关闭的 profile 需要 |
 | 升级插件自身代码 | 已加载模块不热替换，建议重启；刷新浏览器会重新拉取 `lib/client.js` |
 
 ## 9. 能力位映射
 
-字段与能力的对照表在 [README · 生效条件](../README.md#生效条件能力位)。本节给出 `src/mapping.ts#capabilityFailure` 的**判定顺序与报错原文**——它是唯一的判据来源：
+字段与能力的对照表在 [README · 生效条件](../README.md#生效条件能力位)。本节给出 `src/mapping.ts#CAPABILITY_RULES` 的**判定顺序与报错原文**——它是唯一的判据来源，`tests/mapping.spec.ts` 断言这张表的 id 顺序，因此文档不会与代码漂移：
 
-| 顺序 | 触发条件 | 报错原文 |
-|---|---|---|
-| 1 | 定义了 `llm_provider`/`model`/`reasoning_effort`/`max_tokens` 任一，但 provider 无 `agentOptions` | `child LLM routing is unsupported by this provider` |
-| 2 | 定义了 `persona`，但无 `persona` | `persona is unsupported by this provider` |
-| 3 | 定义了 `tools`，但无 `toolFilter` | `tool filtering is unsupported by this provider` |
-| 4 | 定义了 `max_depth`，但无 `depthLimit` | `an explicit depth cap is unsupported by this provider` |
-| 5 | 定义了 `output_schema`，但无 `outputSchema` | `a structured output schema is unsupported by this provider` |
-| 6 | 同时有 `output_schema` 与 `mode = "continuable"` | `a structured output schema applies to one-shot runs only` |
-| 7 | `mode = "continuable"` 且 provider 未实现 `prepareContinuable` | `continuable mode is unsupported by this provider` |
+| 顺序 | 规则 id | 触发条件 | 报错原文 |
+|---|---|---|---|
+| 1 | `agentOptions` | 定义了 `llm_provider`/`model`/`reasoning_effort`/`max_tokens` 任一，但 provider 无 `agentOptions` | `child LLM routing is unsupported by this provider` |
+| 2 | `persona` | 定义了 `persona`，但无 `persona` | `persona is unsupported by this provider` |
+| 3 | `toolFilter` | 定义了 `tools`，但无 `toolFilter` | `tool filtering is unsupported by this provider` |
+| 4 | `depthLimit` | 定义了 `max_depth`，但无 `depthLimit` | `an explicit depth cap is unsupported by this provider` |
+| 5 | `outputSchema` | 定义了 `output_schema`，但无 `outputSchema` | `a structured output schema is unsupported by this provider` |
+| 6 | `outputSchemaOneShot` | 同时有 `output_schema` 与 `mode = "continuable"` | `a structured output schema applies to one-shot runs only` |
+| 7 | `continuable` | `mode = "continuable"` 且 provider 未实现 `prepareContinuable` | `continuable mode is unsupported by this provider` |
 
 这些检查在**调用期**执行（provider 的注册情况是运行时事实，安装期无法判定），报错统一包成：
 
@@ -194,6 +196,8 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 ```
 
 `acp` / `codex` / `claude-code` 声明 `NO_START_CAPABILITIES`（五项能力全无），因此在它们身上使用上述任一字段都会让该定义在调用时不可用；`dsh-sdk` 只有 `agentOptions`。
+
+**隐含深度上限为什么不能无条件下发**：Harness 的服务端在 `start()` 里断言「请求带 `maxDepth` → provider 必须有 `depthLimit`」，而官方工具在挂载期就以 `maxDepth: 'provider-managed'` 明确放弃下发。本插件照同一取舍处理：`max_depth` 是定义作者显式要求的上限（provider 不支持就是该定义的失败）；**没写时不下发隐式上限**给不支持该能力的 provider，否则 `acp`/`codex` 上哪怕一个能力字段都没写也会在调用期整体失败。想让这类 provider 一定有深度上限，就在定义里写 `max_depth`（那时它会明确报"不支持"）。
 
 ## 10. 真机验证结论
 
@@ -231,30 +235,47 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 |---|---|
 | `src/index.ts` | 插件契约：`name` / `inject` / `Config`(Schemastery) / `apply` |
 | `src/plugin.ts` | 按 Agent 安装与释放、补装、失败上报、目录 watcher、`ctx.effect` 清理 |
+| `src/installation.ts` | 每个 Agent 的安装账本：串行化、卸载后不落地、watcher 期望目录集合 |
+| `src/harness.ts` | **唯一**的宿主能力探测点：可选服务（Agent 注册表 / 共享深度策略）与缺失时的明确降级日志 |
 | `src/discovery.ts` | 用户/项目目录、项目根回溯、优先级、重名处理 |
 | `src/definitions.ts` | TOML 解析与字段校验、null-prototype 归一化 |
-| `src/mapping.ts` | 能力位校验、启动请求构造、结果映射 |
+| `src/mapping.ts` | 能力位规则表（`CAPABILITY_RULES`）、深度策略（`depthFor`）、启动请求构造、结果映射 |
 | `src/tool.ts` | 工具 schema、入参校验、委派执行 |
 | `src/host.ts` | 宿主 ctx 的结构性类型声明（**不 import 任何 `@deepseek-ai/dsh-*`**） |
+| `src/skill.ts` | 包内 `assets/skill/SKILL.md` 的读取与技能 provider |
 | `src/client/index.tsx` | 客户端半边：插件自身页面上的配置区（`configForms.whileServed` + `plugins.bundle.config`，键 = bundle 包名），单文件以便 `tsc` 直出 |
-| `src/client/shell-modules.d.ts` | 浏览器模块表的契约声明（react、jsx-runtime、ui-primitives、client/store） |
+| `src/client/shell-modules.d.ts` | 浏览器模块表的契约声明（jsx-runtime、ui-primitives、client/store） |
 | `scripts/build-client.mjs` | 把 CJS 产物包装成 `window.__ModuleLoader__.load({id, factory})` 并校验自洽 |
+| `scripts/check-harness-shape.mjs` | 用已安装的 DSH 校验本插件依赖的声明是否还在（`npm run check:harness`） |
 
 宿主契约：`ctx.tools.register`、`ctx.subagents.{getProvider,list,start,startContinuable,resolveMaxDepth?}`、`ctx.on('agent/created'|'agent/disposed')`、`ctx.inject`、`ctx.get('agents')`、`ctx.logger`、`ctx.effect`。
-客户端契约：`ctx.slots.{inject,register}`、`ctx.locale.{bind,register}`、`ctx.configForms.{get,whileServed}`、`ctx.effect`。
-运行时依赖仅 `@deepseek-ai/schemastery`（Config schema）与 `smol-toml`；构建用 `tsc` 产出 ESM + `.d.ts`，客户端半边用 `tsc`（CJS）+ `scripts/build-client.mjs` 产出 `lib/client.js`，**不需要打包器**。
+客户端契约：`ctx.slots.{inject,register}`、`ctx.locale.register`、`ctx.configForms.{get,whileServed}`、`ctx.effect`。
+运行时依赖仅 `@deepseek-ai/schemastery`（Config schema）与 `smol-toml`；构建用 `tsc` 产出 ESM + `.d.ts`，客户端半边用 `tsc`（CJS）+ `scripts/build-client.mjs` 产出 `lib/client.js`，**不需要打包器**（客户端半边必须是单文件：shell 每个包只服务一个产物，factory 不能同步 require 兄弟 chunk）。
+
+## 12b. 宿主契约的校验方式（应对 DSH 演进）
+
+本插件不 import `@deepseek-ai/dsh-*`，换来的是"发布包版本可以落后于运行时"；代价是编译器看不到声明变化。因此有两道守卫：
+
+| 守卫 | 位置 | 检查什么 |
+|---|---|---|
+| 架构单测 | `tests/architecture.spec.ts` | 宿主半边不得 import 任何 `@deepseek-ai/dsh-*`；客户端半边只能用 shell 模块表里的名字且不得把它列为依赖；manifest 名 = 补丁行名 = 客户端 `BUNDLE_NAME` = `ENTRY_ID`；`.volatile()` 字段恰好是卡片渲染的四个 |
+| 运行时声明检查 | `npm run check:harness` | 逐条核对已安装 DSH 的声明：`subagents.start` / `startContinuable` / `getProvider` / `resolveMaxDepth`、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`prepareContinuable`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` / `listPlugins`、两个团队包。缺一条即 `DRIFT` + 非零退出，并指出要改的模块 |
+
+`check:harness` 刻意**不进 `npm test`**（单测不依赖 DSH 安装）；它在本地与发布前手动运行，且可用 `DSH_SHAPE_ROOT` 指向别的安装位置。
 
 ## 13. 测试与构建
 
 ```sh
-npm run check     # typecheck:host + typecheck:client + check:docs + test
-npm run build     # build:host（tsc → lib/*.js、lib/types/*.d.ts）+ build:client（tsc CJS → 包装成 lib/client.js）
-npm run test      # 只跑测试；pretest 会先重建 lib/client.js
+npm run check          # typecheck:host + typecheck:client + check:docs + test
+npm run check:harness  # 用已安装的 DSH 校验宿主声明（§12b；不在 check 内，因为它需要 DSH 环境）
+npm run build          # build:host（tsc → lib/*.js、lib/types/*.d.ts）+ build:client（tsc CJS → 包装成 lib/client.js）
+npm run test           # 只跑测试；pretest 会先重建 lib/client.js
 ```
 
 - **两个编译面**：宿主用 `tsconfig.json` / `tsconfig.build.json`（ESM + 声明），客户端用 `tsconfig.client.json`（CJS，`removeComments`，输出到临时目录后由 `scripts/build-client.mjs` 包装）。两者互不包含对方的源文件（根配置 `exclude: ["src/client"]`）。
 - **`pretest` 会先构建客户端产物**：产物级测试读取真实的 `lib/client.js`，不先重建就会测到旧产物（这个坑真的踩过）。
-- **68 个单测**覆盖：TOML 解析与全部校验分支、目录优先级与重名、能力位矩阵、请求映射（含 continuable 的字段裁剪）、工具 schema 与入参校验、委派成功/失败/取消、按 Agent 安装与释放、watcher 重装、卸载清理、激活前已存在 Agent 的补装、volatile 惰性读取（设置写入后无需重挂载即生效）。
+- **单测**（`npm test`）覆盖：TOML 解析与全部校验分支、目录优先级与重名（含"坏文件不得吞掉同名合法定义"）、目录不可读时上报而非当成空目录、项目根定位失败时仍加载用户定义、能力位规则表顺序、深度策略（显式 / Host / 不支持时不发）、结构化结果与失败诊断、工具 schema 与入参校验、委派成功/失败/取消、按 Agent 安装与释放、重叠安装串行化、卸载后不落地、watcher 重装/关闭/目录后出现、卸载清理、激活前已存在 Agent 的补装、volatile 惰性读取与 `$DSH_HOME` 解析。
+- **架构单测**（`tests/architecture.spec.ts`）覆盖面见 §12b。
 - **产物级测试**（`tests/client-artifact.spec.ts`）在 Node 里用桩模块表执行真实的 `lib/client.js`，断言：加载器握手格式、导出契约（`apply`/`inject`/`NS`/`ENTRY_ID`/`BUNDLE_NAME`）、**只注册 `plugins.bundle.config` 一个插槽且键为 bundle 包名**（不得出现 `plugins.item`）、卡片渲染与开关暂存。产物缺失时该测试自跳过。
 - 测试使用假 `ctx` 与内存文件系统，**不启动 DSH、不读写真实 `$DSH_HOME`**。
 - 发布注意：`publishConfig.access: public` 是 scoped 包公开发布所必需的（默认 restricted）；`files` 需要覆盖运行时会用到的全部相对产物与文档（`lib`、`assets`、`cordis.patch.yml`、`README.md`、`guide`）；`prepublishOnly` 会在发布前跑完整 `check`。
@@ -325,11 +346,11 @@ ctx.remote.pluginManager.listPlugins()   // BundleInfo{ name, enabled, rows[{row
 判定式（任一成立即视为团队在运行）：
 
 ```text
-bundle.enabled && (name === '@deepseek-ai/dsh-experimental-agent-team-profile' || /(^|[/@-])agent-team(-profile)?$/u.test(name))
+bundle.enabled && /(^|[/@-])agent-team(-profile)?$/u.test(name)
 plugin.enabled && moduleName ∈ { '@deepseek-ai/dsh-experimental-agent-team', '@deepseek-ai/dsh-experimental-tool-agent-team' }
 ```
 
-第二条覆盖"没装组合包但把团队行挂进 profile"的情形；名称正则覆盖第三方同名组合包——它们造成的冲突与官方一致，报出来才是对的。**host 半边不做任何检测**：多一条真相源只会让"提示"与"实际组合"漂移。
+名称正则同时匹配官方包名 `@deepseek-ai/dsh-experimental-agent-team-profile`（因此不需要再单独比较该常量）；第二条覆盖"没装组合包但把团队行挂进 profile"的情形；正则覆盖第三方同名组合包——它们造成的冲突与官方一致，报出来才是对的。**host 半边不做任何检测**：多一条真相源只会让"提示"与"实际组合"漂移。
 
 **注入与取数**（两处实测踩点）：
 

@@ -36,8 +36,11 @@ persona = """
 #        1 = 允许本次委派，但该子代理不能再往下委派（它的子代理深度会是 2 > 1）。
 max_depth = 1
 
-# [可选] 结构化返回：父会话收到的是符合该 schema 的结果（需要 provider 能力 outputSchema，
+# [可选] 结构化返回：父会话收到的是**符合该 schema 的 JSON 文本**（需要 provider 能力 outputSchema，
 #        且只能配 mode = "one-shot"）。删掉本行则返回子代理的最终文本。
+#        注意：Harness 会给这类子代理下"必须用结构化工具交值、不要以纯文本收尾"的指令，
+#        所以它的最终文本通常是空的 —— 真正的结论就在这段 JSON 里。想同时要一段散文总结，
+#        在 persona 里另外要求它写。
 output_schema = { type = "object", properties = { summary = { type = "string" }, findings = { type = "array", items = { type = "string" } } }, required = ["summary"] }
 
 # [可选] 从子代理的提示词里移除并拒绝执行这些工具（只能做减法，需要 provider 能力 toolFilter）。
