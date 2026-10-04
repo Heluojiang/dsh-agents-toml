@@ -28,6 +28,10 @@ enabled = true
 #        父会话空闲会被唤醒。**只回传收尾消息的文本**：中途的工具输出、推理都不在其中 ——
 #        所以 persona 必须要求子代理把结论写在最后一条消息里（本文件的 persona 就是"检查"，
 #        若要发给父代理，取消下面 persona 段里的收尾发送要求）。
+#        中途那条与收尾那条形态不同，不要混判：中途由子代理主动 send_message，父会话看到
+#        `Agent <子代理id> sent a message:` + 正文（只表示"还在跑，先报一件事"）；收尾由宿主
+#        自动投递 `Background subagent <id> finished …` + `Its closing message:`。要求中途提前
+#        告知时，务必写明**只发增量**，否则子代理会把整份结论中途也发一遍，父会话收到两份重叠内容。
 #        续聊要用官方 `dsh-tool-subagent-control` 的 send_message（参数是 agent_id，
 #        只授权直接父子之间）；若该 profile 启用了 Agent Teams，它会禁用这个控制工具，
 #        换成按 target 寻址队友的同名工具 —— 但上面的结算通知**不受影响**，仍会送达。
@@ -65,6 +69,7 @@ deny = ["write", "edit"]
 #
 # continuable 定义必须要求子代理把结论写进最后一条消息，否则父会话只会收到一条空通知：
 # 收尾时给出「结论 + 证据（文件/符号/行号）+ 未解决问题」，不要只回一句"完成"。
+# 中途要提前告知时，只发那一条增量（send_message(agent_id = 父代理 id)），完整结论仍只放收尾消息。
 # """
 # output_schema = { type = "object", properties = { summary = { type = "string" } }, required = ["summary"] }
 # ↑ 让子代理返回结构化结果（需要 provider 能力 outputSchema），且**只能**配 mode = "one-shot"，

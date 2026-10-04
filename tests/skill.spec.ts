@@ -44,6 +44,15 @@ test('the asset states how a continuable run reports back, since that decides th
   assert.match(content, /settlement notice/)
   assert.match(content, /closing message/)
   assert.match(content, /## 4b\. Writing the `persona` for the mode you chose/)
+  // A mid-run `send_message` looks different from the settlement notice, and a
+  // persona told merely to "send something early" makes the child re-send its
+  // whole conclusion. Both facts have to be stated where the persona is written.
+  assert.match(content, /sent a message/)
+  assert.match(content, /increment/)
+  // The notice only reaches a parent that is still alive, so the guide must not
+  // promise delivery to a run that has already ended.
+  assert.match(content, /no durable parent mailbox/)
+  assert.match(content, /one-shot` instead/)
 })
 
 test('a frontmatter name that disagrees with the registered one is rejected', () => {

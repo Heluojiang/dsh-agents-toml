@@ -214,6 +214,7 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 | **0.3.2 复验：设置写入是否到达"已打开的会话"** | GUI + 会话日志（C1） | ✅ 同一会话两次请求对比：写入前 `agent_type` 枚举不存在（=插件未安装该工具），在**已打开**的会话里保存开关后，下一次请求的枚举即为 5 个项目定义，无需重启、无需重开会话 |
 | **0.3.2 复验：定义文件的目录监听** | GUI + 会话日志（C4） | ✅ 会话运行期间新建 toml → 同会话下一次请求的枚举多出该名字；删除后下一次请求又消失（200ms 去抖足够） |
 | **0.3.2 复验：`continuable` 结算通知** | GUI + 会话日志（C3） | ✅ 父会话收到 `agent/inbox/spliced`：`Background subagent <id> finished …` + `Its closing message:`，第二段与子代理最后一条 assistant 消息**逐字相同**；投递目标视父会话当时是否在跑而定（空闲时为 `next-turn`，进行中为 `next-step`，两者都携带通知）；空闲父会话被唤醒继续跑（`turn/start` 1 → 2） |
+| **0.3.4 复验：中途 `send_message` 与结算通知是两种形态** | GUI 真实模型（2 个 continuable 定义 × 各 1 轮） | ✅ 中途消息到达父会话时形态为 `Agent <childId> sent a message:` + 正文（**不是**结算通知）；发送方同步收到投递确认 `message delivered to agent <父会话id>`，4 次投递 4 次 delivered。收尾仍为 `Background subagent <id> finished …` + `Its closing message:`。persona 写明"中途只发增量"后，两个角色的中途消息都只剩一条增量、完整结论落在收尾（此前两者都会把整份结论中途也发一遍）。注意：该场景验证的是**父会话在线**时的投递形态；"父会话先结束就收不到"这条限制见 §11，依据为源码与官方限制条目，**未做 headless 真机复现** |
 | **0.3.2 复验：`[tools] deny` 与 persona 注入** | 真实模型 headless（`scripts/e2e-headless.mjs`） | ✅ 25 个全局工具、`agent_type` 枚举与项目定义逐字一致、枚举说明含每条 `description`；`explorer` 的 `deny = ["write","edit"]` 后子代理侧 23 个工具、`write`/`edit` 消失；AGENTS.md 注入子会话 |
 | **GitHub 安装路径** | 本地 git 克隆模拟 + **真实仓库 `github:Heluojiang/dsh-agents-toml`** | ✅ 干净检出无 `lib/`；pnpm 先拦截 `prepare`，按 pnpm 打印的完整 key（codeload tarball URL + SHA）放行后重跑成功；安装副本由 `prepare` 构建出 `lib/`，且该构建产物能被 Harness 装载（Config schema 被采集、行进入组合） |
 
@@ -234,6 +235,7 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 - **`defaultProvider` / `projectAgentsDir` / `userAgentsDir` 不在设置页**：这些是部署布局，不是每用户偏好，只能在插件行 config 里改（因此它们也不是 volatile）。
 - **工具名写错只能在调用期发现**：DSH 未暴露可枚举的全局工具名清单，因此无法在安装期预检 `[tools]` 名字。
 - **`continuable` 不支持 `output_schema`**：该能力只适用于一次性运行。
+- **结算通知需要直接父会话存活**：`notifySettlement()` 先查 `ctx.agents.get(parentSession)`，父已不存在就直接 `return`（**静默丢弃、无重放**）；`activation.announced` 为 false 时同样不投递。服务**没有持久化父邮箱**，通知只在父会话自己的 turn 流里追加（官方 `dsh-subagent` 的限制条目同此）。因此一次性父运行（headless / `-p` 单轮 / 脚本化）不应依赖 `continuable` 回传，改用 `one-shot`。本插件不参与该路径，也不做补偿。
 
 ## 12. 实现结构
 

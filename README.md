@@ -311,7 +311,7 @@ Host 的深度是**绝对深度上限**，而 Harness 规定：请求里带 `max
 
 ### 继续一个 continuable 子代理（依赖官方控制工具）
 
-`mode = "continuable"` 是 **Harness 自带能力**（`ctx.subagents.startContinuable()`），本插件只把 TOML 字段映射过去，不自己实现回传与续聊。于是有三条必须分清的事实：
+`mode = "continuable"` 是 **Harness 自带能力**（`ctx.subagents.startContinuable()`），本插件只把 TOML 字段映射过去，不自己实现回传与续聊。于是有四条必须分清的事实：
 
 1. **工具返回值只是"已启动"**：`started subagent <childId>`（与官方 `subagent` 工具在 continuable 下的措辞逐字相同）。初始 prompt 在**入队被接受**时就返回，这就是这次调用的全部返回值 —— **结论不在里面**。
 2. **收尾会回传，但只回传最终文本**：子代理那一轮结束时，`dsh-subagent` 的续接管理器会向父会话投递一条**结算通知**（官方措辞：`you are notified when the run settles`）：
@@ -323,7 +323,10 @@ Host 的深度是**绝对深度上限**，而 Harness 规定：请求里带 `max
    ```
 
    父会话空闲时会被它唤醒；挂掉/超限/拒绝/失败的收尾也各有对应句式（`was stopped before it finished` / `ran out of room` / `declined the task` / `failed before it finished`），没有文本时写 `It left no closing message.`。**不回传**的是中间过程：工具输出、推理、以及中途说过但不在收尾文本里的话 —— 这些要靠消息往返。
-3. **续聊要靠官方的 `dsh-tool-subagent-control`**，不是任意叫 `send_message` 的工具：
+
+   **两种投递形态不要混判**：子代理**运行中**主动 `send_message(agent_id = 父代理 id)` 时，父会话看到的形态是 `Agent <子代理id> sent a message:` + 正文 —— 它只表示"还在跑，先报一件事"；只有**这一轮结束**后由宿主自动投递的 `Background subagent <id> finished …` + `Its closing message:` 才表示"已收尾，以下是结论"。发送方会同步拿到投递确认（`message delivered to agent <父会话id>`），失败时返回错误、可见且可重发；这条确认是**送达**而非答复。
+3. **父会话必须在它收尾时仍然存在**：结算通知由续接管理器投递给**当时仍活着的直接父 Agent** —— 服务没有持久化父邮箱，父会话若已结束（典型是 `dsh … "任务"` 这类一次性 headless 运行，父轮次先 `turn/end`），通知无处投递、**静默丢弃且不重放**。注意这与模型侧 `send_message` 不同：那条失败会返回错误，而结算通知这一路不会报错。因此**需要当场拿到结论的一次性任务请用 `one-shot` 定义**（`one-shot` 的结论就是工具返回值，不经过这条路）；`continuable` 留给父会话能持续在线的场景（GUI 会话）。
+4. **续聊要靠官方的 `dsh-tool-subagent-control`**，不是任意叫 `send_message` 的工具：
 
 | 工具 | 参数 | 语义 |
 |---|---|---|
@@ -348,6 +351,9 @@ Host 的深度是**绝对深度上限**，而 Harness 规定：请求里带 `max
 **误解 3：装了 Agent Teams 就不能用本插件了，或者装了就收不到子代理结论。**
 本插件的 `agent_type` 委派直接调用 `ctx.subagents.start()` / `startContinuable()`，与官方 `tool-subagent*` 无关，所以**委派本身照常可用**；**结算通知也照常投递**（它由续接管理器发出，团队组合包只禁用四个工具行）。但官方**不支持**这个组合使用方式：被 Agent Teams 替换掉的正是"官方直连委派"那一路 —— 父代理续聊 continuable 子代理的控制工具、`list_agents`（变成列队友）、以及官方 `subagent` / `subagent_fork` 工具本身。因此本插件**不推荐**、也不支持与它同时启用；设置页检测到团队开启时会显示红色提示（提示框自身可关闭；**关闭团队仍需你自己在插件页操作，本插件不会代为改动 profile**），完整说明见[与智能体团队（Agent Teams）不支持组合使用](#与智能体团队agent-teams不支持组合使用)。
 
+**误解 4：`continuable` 保证父会话一定收得到结论。**
+收得到的前提是**父会话在子代理收尾时仍然存在**。结算通知没有持久化邮箱，只在父会话自己的 turn 流里追加；父会话先结束就静默丢失，也不会重放。一次性运行（headless / `-p` 单轮 / 脚本化）要用 `one-shot` 定义，它的结论就是工具返回值。
+
 ### `output_schema` 的返回值长什么样
 
 配了 `output_schema` 的 `one-shot` 定义，父会话**收到的是符合该 schema 的 JSON 文本**（缩进两格）。这一点值得单独说明，因为 Harness 会给这类子代理下一条硬指令（`When you have your final answer, you MUST report it by calling the structured_output tool… Do not finish with a plain text answer`）：子代理的最终文本**通常是空的**，真正的结论在结构化值里。所以：
@@ -364,7 +370,7 @@ Host 的深度是**绝对深度上限**，而 Harness 规定：请求里带 `max
 | 你选的 `mode` | 父会话拿到什么 | `persona` 必须写清的 |
 |---|---|---|
 | `one-shot` | 工具调用的返回值 = 子代理最终文本（配了 `output_schema` 时改为那段 JSON） | 报告什么、什么顺序、什么算证据 |
-| `continuable` | 先拿到子代理 id；收尾时收到**结算通知**，里面只有子代理**最后一条消息的文本** | **要求它把结论写在收尾消息里**（研究发现 + 证据 + 未解决问题），不要只回"完成"；中途必须让父会话知道的发现，再要求它用 `send_message(agent_id = 父代理 id)` 提前发出 |
+| `continuable` | 先拿到子代理 id；收尾时收到**结算通知**，里面只有子代理**最后一条消息的文本** | **要求它把结论写在收尾消息里**（研究发现 + 证据 + 未解决问题），不要只回"完成"；中途必须让父会话知道的发现，再要求它用 `send_message(agent_id = 父代理 id)` 提前发出，并明确**只发那一条增量**、完整结论仍只放收尾消息 —— 漏写后半句时，子代理会把整份结论中途也发一遍，父会话收到两份重叠内容（先是一条 `Agent <id> sent a message:`，随后收尾通知里又是同一份） |
 
 两种模式都不要把**本次任务**写进 `persona`（任务由调用方的 `prompt` 传入），也不要重复调用方已有的规则；`persona` 只写角色、边界和汇报格式。
 
