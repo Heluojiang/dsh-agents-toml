@@ -161,22 +161,25 @@ max_depth = 1
 output_schema = { type = "object", properties = { summary = { type = "string" } }, required = ["summary"] }
 ```
 
-配套的 preset（示意）：
+配套的 preset 就是 §一 里那两个行（注册表 + `id: reviewer` 的 preset 行），**只是 `plugins` 里只挂读类工具行、不挂 `write`/`edit`/shell** —— 这就是"只读"的全部做法：
 
 ```yaml
-- id: agent-presets
-  config:
-    presets:
-      reviewer:
+    - id: agent-preset-reviewer
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: reviewer
         name: 只读代码审查
         plugins:
           - id: persona
-            module: '@deepseek-ai/dsh-persona'
+            name: '@deepseek-ai/dsh-persona'
             config:
               prefix: |
                 你是资深代码审查者。只报告问题与依据，不修改文件；需要改动时在结论里说明建议。
-          # 只挂读类工具行；不挂 write / edit / shell —— 这就是"只读"
+          # 再挂上这个子代理**可以用**的工具行（read/grep/glob/…）；
+          # 不挂 write / edit / shell —— 没挂的就是它用不了的
 ```
+
+（一个 preset 里要挂哪些工具行，取决于你的组合里工具是怎么装的；`dsh --profile <profile> --dump-config` 能列出当前组合的行 id。）
 
 **要点的三条**：
 
