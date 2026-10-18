@@ -27,25 +27,37 @@ persona = """
 agent_preset = "reviewer"      # 人设搬到这个 preset 里
 ```
 
-人设文本搬到那个 preset 的插件行里（`config.prefix`）：
+人设文本搬到那个 preset 的插件行里（`config.prefix`）。0.2.1 的 preset 由**两行**组成：一行注册表（声明默认 preset），外加**每个 preset 一行**：
 
 ```yaml
 # $DSH_HOME/profiles/<profile>/cordis.patch.yml
-- id: agent-presets
-  config:
-    presets:
-      reviewer:
+- insert:
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
+      config:
+        default: reviewer          # 必填：未显式选择时的默认 preset id
+    - id: agent-preset-reviewer
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: reviewer               # 定义里 agent_preset 写的就是这个 id
         name: 只读代码审查
-        description: 只报告问题与依据，不修改文件。
         plugins:
           - id: persona
-            module: '@deepseek-ai/dsh-persona'
+            name: '@deepseek-ai/dsh-persona'
             config:
               prefix: |
                 你是资深代码审查者。只报告问题与依据，不修改文件；需要改动时在结论里说明建议。
 ```
 
-（上面是示意结构。preset 的声明方式以你所用版本的官方文档为准 —— 关键是：**一段人设 = 一个 persona 行 = 一个 preset**。preset 是"一套插件组合"，人设只是其中之一。）
+关键点三条：**一段人设 = 一个 `dsh-persona` 行**；**一个 preset = 一行 `dsh-agent-preset`**，它的 `config.id` 才是定义里要写的值；**没有注册表行就没有 preset 服务**，`agent_preset` 会在调用期报"这个组合没有挂 agent-presets 服务"。preset 行与注册表行放在同一个 profile 补丁里，改完即时生效（HMR），不用重启。
+
+> **web 组合已经挂了这个注册表**（`dsh-web-app` 的 `cordis.patch.yml` 里有 `agent-preset-registry`，`default: standard`），所以从 web 档起步的人**只需要加 preset 那行**，重复插一行注册表会让注册表出现两次。想知道你的组合里到底有没有，直接问 Harness 本人：
+>
+> ```sh
+> dsh --profile <profile> --dump-config | Select-String agent-preset-registry
+> ```
+>
+> headless 组合（`base`/`headless`/`acp-app`/`sdk-app`）没有这一行，两行都要自己加。
 
 **为什么不能保留 `persona`**：不是本插件懒，而是 0.2.1 的启动请求类型里已经没有这个字段了；继续接受它只会得到一个"写进去但不生效"的静默失败，比报错更糟。
 
