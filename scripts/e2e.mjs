@@ -1,31 +1,37 @@
 // Run the plugin's end-to-end scenarios against a real Harness.
 //
 //   node scripts/e2e.mjs                # the keyless Loader scenario
-//   E2E_PROJECT=<dir> E2E_API_KEY=...   # adds the keyed delegation scenario
+//   E2E_PROJECT=<dir> [E2E_API_KEY=...] # adds the delegation scenario
 //   E2E_GUI=<url>                       # adds the browser scenarios
 //
 // Environment:
 //   E2E_DSH_ROOT     Harness installation (defaults to the installed @deepseek-ai/dsh)
 //   E2E_PLUGIN_ROOT  this checkout (defaults to the repository root)
-//   E2E_HOME         a throwaway DSH home; the keyed scenario needs a profile there
+//   E2E_HOME         a throwaway DSH home; the delegation scenario needs a profile there
 //   E2E_PROFILE      profile inside that home for the headless run (default `plugin-dev`)
 //   E2E_GUI_PROFILE  profile the browser instance runs, when it differs (default `plugin-gui`)
 //   E2E_PROJECT      project whose `.dsh/agents` definitions are exercised
+//   E2E_API_KEY      provider key; without it a scripted Messages stub stands in for the model
 //   E2E_BASE_URL     provider base URL, when the key does not target the default endpoint
-//   E2E_API_KEY      provider key; without it the keyed scenario is skipped, not failed
 //   E2E_GUI          URL of a running Harness Web instance to drive over CDP
 //   E2E_CDP_PORT     remote debugging port for that instance (default 9222)
+//
+// The delegation scenario needs a model that will delegate. With `E2E_API_KEY`
+// that is the real provider; without one, `scripts/e2e-model-stub.mjs` speaks the
+// same Messages wire protocol and decides to delegate deterministically, which
+// keeps the whole chain below the model real (Loader, `subagent` service, Agent
+// Preset registry, this plugin's tool) while costing no tokens.
 //
 // The project under test is only read and reverted: the guard below hashes every
 // definition and `AGENTS.md` before the run and proves all of them unchanged
 // after it.
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { definitionNames, deniedDefinition } from './e2e-headless.mjs'
+import { definitionNames, presetDefinition, PRESET_MARKER } from './e2e-headless.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pluginRoot = resolve(process.env.E2E_PLUGIN_ROOT ?? join(here, '..'))
@@ -66,6 +72,37 @@ function runGitStatus(project) {
   return result.status === 0 ? result.stdout : `git failed: ${String(result.stderr).slice(0, 200)}`
 }
 
+/**
+ * Start the scripted model in its own process.
+ *
+ * It cannot live in this one: the delegation scenario drives the headless run
+ * synchronously, so a stub sharing this event loop would deadlock against it.
+ * @param options - the plugin root, the definition to delegate to, and the preset marker.
+ * @returns the stub's base URL and a synchronous teardown.
+ */
+async function startStubModel({ pluginRoot: root, agentType, presetMarker }) {
+  const script = join(root, 'scripts', 'e2e-model-stub.mjs')
+  const child = spawn(process.execPath, [
+    script, '--port', '0', '--agent-type', agentType, '--preset-marker', presetMarker,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const baseUrl = await new Promise((resolve, reject) => {
+    let buffered = ''
+    const timer = setTimeout(() => reject(new Error('the model stub did not report a port in 10s')), 10_000)
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', chunk => {
+      buffered += chunk
+      const match = /stub listening (http:\/\/\S+)/.exec(buffered)
+      if (match !== null) {
+        clearTimeout(timer)
+        resolve(match[1])
+      }
+    })
+    child.on('error', error => { clearTimeout(timer); reject(error) })
+    child.on('exit', code => { clearTimeout(timer); reject(new Error(`the model stub exited with ${String(code)}`)) })
+  })
+  return { baseUrl, close: () => { child.kill() } }
+}
+
 const dshRoot = resolveDshRoot()
 const home = process.env.E2E_HOME
 const project = process.env.E2E_PROJECT
@@ -84,30 +121,51 @@ const { runLoaderScenario } = await import('./e2e-loader.mjs')
 const loader = await runLoaderScenario({ dshRoot, pluginRoot })
 sections.push({ name: 'loader', failures: loader.failures })
 
-if (apiKey !== undefined && project !== undefined) {
-  if (home === undefined) throw new Error('E2E_HOME is required for the keyed scenario')
-  console.log('\n== Delegation scenario (keyed) ==')
+if (project !== undefined) {
+  if (home === undefined) throw new Error('E2E_HOME is required for the delegation scenario')
+  console.log(`\n== Delegation scenario (${apiKey === undefined ? 'scripted stub' : 'real provider'}) ==`)
+  const profile = process.env.E2E_PROFILE ?? 'plugin-dev'
   const before = snapshotProject(project)
-  const denied = deniedDefinition(project)
-  if (denied === undefined) {
-    throw new Error(`${project} has no definition with a non-empty [tools] deny list, so the scenario cannot prove a removal`)
+  const preset = presetDefinition(project)
+  if (preset === undefined) {
+    throw new Error(`${project} has no definition with an agent_preset, so the scenario cannot prove the preset reached the child`)
   }
-  const { runHeadlessScenario } = await import('./e2e-headless.mjs')
-  const headless = runHeadlessScenario({
-    dshRoot,
-    home,
-    profile: process.env.E2E_PROFILE ?? 'plugin-dev',
-    project,
-    // One narrow delegation, naming the definition that denies tools so the
-    // recorded child tool table can be compared against its deny list. A broader
-    // prompt only spends tokens without adding evidence.
-    prompt: `只做一件事：调用一次 subagent_custom，agent_type 必须是 "${denied.name}"，prompt 写"只回复一行：已确认"。`
-      + '拿到子代理结果后直接结束本轮，不要做别的检索，也不要自己再委派。',
-    apiKey,
-    baseUrl: process.env.E2E_BASE_URL,
-    denied,
-  })
-  sections.push({ name: 'delegation', failures: headless.failures })
+  // `agent_preset` needs a composition that mounts the preset registry, and the
+  // headless default profile does not; the scenario therefore has to declare both
+  // the registry and an example preset in its own throwaway profile.
+  const { ensurePresetProfile } = await import('./e2e-preset-profile.mjs')
+  ensurePresetProfile({ home, profile, dshRoot })
+
+  // Without a key, the model itself is scripted: the stub speaks the provider
+  // protocol and decides to delegate, so everything below the model stays real.
+  // It has to be its own process: the headless run is driven synchronously, and a
+  // stub sharing this process's event loop could never answer it.
+  let stub
+  if (apiKey === undefined) {
+    stub = await startStubModel({ pluginRoot, agentType: preset.name, presetMarker: PRESET_MARKER })
+    console.log(`  stub model at ${stub.baseUrl}`)
+  }
+  try {
+    const { runHeadlessScenario } = await import('./e2e-headless.mjs')
+    const headless = runHeadlessScenario({
+      dshRoot,
+      home,
+      profile,
+      project,
+      // One narrow delegation, naming the definition that selects a preset so the
+      // child session can be checked for the preset's effect. A broader prompt only
+      // spends tokens without adding evidence.
+      prompt: `只做一件事：调用一次 subagent_custom，agent_type 必须是 "${preset.name}"，prompt 写"只回复一行：已确认"。`
+        + '拿到子代理结果后直接结束本轮，不要做别的检索，也不要自己再委派。',
+      // The stub accepts any bearer token; a real provider needs the real one.
+      apiKey: apiKey ?? 'stub-key',
+      baseUrl: process.env.E2E_BASE_URL ?? stub?.baseUrl,
+      preset,
+    })
+    sections.push({ name: 'delegation', failures: headless.failures })
+  } finally {
+    stub?.close()
+  }
 
   const after = snapshotProject(project)
   const changed = Object.keys({ ...before.hashes, ...after.hashes })
@@ -120,7 +178,7 @@ if (apiKey !== undefined && project !== undefined) {
     sections.push({ name: 'guard', failures: [{ id: 'git-status-stable' }] })
   }
 } else {
-  console.log('\n== Delegation scenario skipped: set E2E_PROJECT and E2E_API_KEY to run it ==')
+  console.log('\n== Delegation scenario skipped: set E2E_PROJECT to run it ==')
 }
 
 if (guiUrl !== undefined) {

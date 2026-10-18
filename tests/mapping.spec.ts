@@ -14,7 +14,7 @@ import {
   describeResult,
   outputText,
 } from '../src/mapping.ts'
-import { createAgent, createFakeContext, createFakeSubagents, FULL_CAPABILITIES, NO_CAPABILITIES } from './harness.ts'
+import { createAgent, createFakeContext, createFakeSubagents, FORK_CAPABILITIES, FULL_CAPABILITIES, NO_CAPABILITIES } from './harness.ts'
 
 function definition(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
   return {
@@ -40,7 +40,7 @@ function agent(): AgentLike {
 describe('capabilityFailure', () => {
   it('accepts a definition the provider fully supports', () => {
     const full = definition({
-      persona: 'p', tools: { deny: ['write'] }, maxDepth: 0, llmProvider: 'deepseek-official', model: 'm',
+      agentPreset: 'reviewer', maxDepth: 1, llmProvider: 'deepseek-official', model: 'm',
       outputSchema: { type: 'object' },
     })
     assert.equal(capabilityFailure(full, provider()), undefined)
@@ -49,10 +49,18 @@ describe('capabilityFailure', () => {
   it('names the unsupported feature for an out-of-process transport', () => {
     const outOfProcess = provider({ name: 'codex', capabilities: NO_CAPABILITIES })
     assert.match(capabilityFailure(definition({ model: 'm' }), outOfProcess) ?? '', /child LLM routing/)
-    assert.match(capabilityFailure(definition({ persona: 'p' }), outOfProcess) ?? '', /persona/)
-    assert.match(capabilityFailure(definition({ tools: { deny: ['write'] } }), outOfProcess) ?? '', /tool filtering/)
+    assert.match(capabilityFailure(definition({ agentPreset: 'p' }), outOfProcess) ?? '', /agent preset/)
     assert.match(capabilityFailure(definition({ maxDepth: 1 }), outOfProcess) ?? '', /depth cap/)
     assert.match(capabilityFailure(definition({ outputSchema: { type: 'object' } }), outOfProcess) ?? '', /structured output/)
+  })
+
+  it('rejects an independent preset on a provider that inherits the parent context', () => {
+    // The Harness rejects `agentPreset` whenever the provider inherits the
+    // parent's context, so `fork` cannot select one even though it supports the
+    // other start-time features.
+    const fork = provider({ name: 'fork', capabilities: FORK_CAPABILITIES, inheritsParentContext: true })
+    assert.match(capabilityFailure(definition({ agentPreset: 'p' }), fork) ?? '', /agent preset/)
+    assert.equal(capabilityFailure(definition({ model: 'm' }), fork), undefined)
   })
 
   it('rejects continuable mode without a continuable-capable provider', () => {
@@ -83,35 +91,28 @@ describe('buildAgentOptions', () => {
 })
 
 describe('buildRunRequest', () => {
-  it('carries label, prompt, parent, signal, and the resolved depth', () => {
+  it('carries prompt, parent, and the resolved depth', () => {
     const parent = agent()
-    const controller = new AbortController()
     const request = buildRunRequest(
-      { definition: definition(), parent, signal: controller.signal, maxDepth: 1 },
+      { definition: definition(), parent, maxDepth: 1 },
       'review the diff',
-      'review diff',
     )
-    assert.equal(request.label, 'review diff')
     assert.deepEqual(request.prompt, [{ type: 'text', text: 'review the diff' }])
     assert.equal(request.parent, parent)
-    assert.equal(request.signal, controller.signal)
     assert.equal(request.maxDepth, 1)
     assert.equal(request.outputSchema, undefined)
   })
 
-  it('passes persona, tool filter, and output schema through', () => {
+  it('passes the agent preset and output schema through', () => {
     const request = buildRunRequest(
       {
-        definition: definition({ persona: 'p', tools: { allow: ['read'] }, outputSchema: { type: 'object' } }),
+        definition: definition({ agentPreset: 'reviewer', outputSchema: { type: 'object' } }),
         parent: agent(),
-        signal: new AbortController().signal,
         maxDepth: undefined,
       },
       'p',
-      'l',
     )
-    assert.equal(request.persona, 'p')
-    assert.deepEqual(request.toolFilter, { allow: ['read'] })
+    assert.equal(request.agentPreset, 'reviewer')
     assert.deepEqual(request.outputSchema, { type: 'object' })
     assert.equal(request.maxDepth, undefined)
   })
@@ -128,6 +129,14 @@ describe('buildContinuableRequest', () => {
     assert.equal('label' in request, false)
     assert.equal('signal' in request, false)
     assert.equal('outputSchema' in request, false)
+  })
+
+  it('carries an agent preset, which a continuable child may select', () => {
+    const request = buildContinuableRequest(
+      { definition: definition({ mode: 'continuable', agentPreset: 'explorer' }), parent: agent(), maxDepth: undefined },
+      'go',
+    )
+    assert.equal(request.agentPreset, 'explorer')
   })
 })
 
@@ -157,13 +166,13 @@ describe('depthFor', () => {
 
 describe('CAPABILITY_RULES', () => {
   it('reports the first failing rule in table order', () => {
-    const both = definition({ model: 'm', persona: 'p' })
+    const both = definition({ model: 'm', agentPreset: 'p' })
     assert.match(capabilityFailure(both, provider({ name: 'codex', capabilities: NO_CAPABILITIES })) ?? '', /child LLM routing/)
   })
 
   it('lists every rule id the documentation table repeats', () => {
     assert.deepEqual(CAPABILITY_RULES.map(rule => rule.id), [
-      'agentOptions', 'persona', 'toolFilter', 'depthLimit', 'outputSchema', 'outputSchemaOneShot', 'continuable',
+      'agentOptions', 'agentPreset', 'depthLimit', 'outputSchema', 'outputSchemaOneShot', 'continuable',
     ])
   })
 })

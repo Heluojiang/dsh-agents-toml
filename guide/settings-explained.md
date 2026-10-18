@@ -1,7 +1,8 @@
 # 配置开关说明（配合场景理解）
 
 本插件在插件页上的四个控件分别做什么。配套的定义示例在本目录：
-[`explorer.toml`](explorer.toml)（轻量探索、可继续）、[`reviewer.toml`](reviewer.toml)（只读审查、拒绝写入）。
+[`explorer.toml`](explorer.toml)（轻量探索、可继续）、[`reviewer.toml`](reviewer.toml)（只读审查、结构化返回）；
+两个示例都用 `agent_preset` 把"人设 + 只读工具集"交给一个 Agent Preset —— 这是 0.4.0 起的唯一做法，见 [`migrating-to-0.4.md`](migrating-to-0.4.md)。
 
 ## 先分清一条界线：安装时 vs 调用时
 
@@ -55,7 +56,7 @@
 ## 四、在工具描述里列出不可用定义（`reportFailuresToModel`，默认开）
 
 - **作用**：把**失败的定义及原因**写进工具描述，让模型知道"哪些定义被跳过了、为什么"。失败本身永远不影响其他定义。
-- **例子（开着）**：把 `reviewer.toml` 的 `max_depth = 1` 误改成 `0`（或把 `[tools] deny` 里写成不存在的工具名）。该定义被跳过，其余照常，工具描述里会多出：
+- **例子（开着）**：把 `reviewer.toml` 的 `max_depth = 1` 误改成 `0`，或把 `agent_preset` 写成一个你没有声明的 id。该定义被跳过（第二种情况是**调用期**才失败，见下方注），其余照常，工具描述里会多出：
 
   ```
   Unavailable definitions: reviewer (max_depth must be at least 1).
@@ -69,20 +70,22 @@
   subagent "reviewer" is unavailable: max_depth must be at least 1 (…\.dsh\agents\reviewer.toml)
   ```
 
-  本开关只影响"事前告知"。
+  本开关只影响"事前告知"。注意区分两类失败：**解析期失败**（文件写错，如未知键、`persona`/`[tools]` 这类已移除的键、`max_depth = 0`）会让定义进不了列表；**调用期失败**（`agent_preset` 指向不存在的 preset、组合没挂 `agent-presets`、provider 能力不匹配）时定义仍在列表里，只有真正委派那一下才报错。
 - **代价**：工具描述随每次模型请求发送；失败条目多、理由长时会持续占 token。
 - **生效时机**：**立即**，与**工具名**相同——保存后重装各 Agent 的工具，描述当场重新生成。
 
 ## 组合场景
 
-你在长会话中新增 `.dsh/agents/security-audit.toml`，但里面把 `[tools] deny` 写成了不存在的工具名：
+你在长会话中新增 `.dsh/agents/security-audit.toml`，但里面把 `persona` 留着了（0.4.0 已移除该字段）：
 
 | 配置 | 现象 |
 |---|---|
-| 监听开 + 失败上报开 | 约 200ms 后描述刷新；`security-audit` 因失败**不在** `agent_type` 列表里，但描述带着原因 → 你一问，模型说得出"deny 里的名字不存在" |
+| 监听开 + 失败上报开 | 约 200ms 后描述刷新；`security-audit` 因失败**不在** `agent_type` 列表里，但描述带着原因 → 你一问，模型说得出"persona 已被移除，请改用 agent_preset" |
 | 监听开 + 失败上报关 | 描述刷新了，但**只有**可用名单；模型不知道 security-audit 的存在与原因，你得自己看日志 |
 | 监听关 | 模型手里的清单仍是会话开始时的样子，要等新任务或保存一次设置才刷新（调用期依然读最新文件） |
 | 两个都关 | 完全静默：模型看到的与磁盘可能长期不一致 |
+
+> **只想升级不改文件时最坑的一种**：如果 `security-audit.toml` 是你**唯一**的定义，它失败后就没有可用定义，插件**不注册委派工具** —— 表现是工具整个不见了、`agent_type` 也没了，而唯一的信号只有 Host 日志里那一行 `dsh-agents-toml: <file>: persona was removed in 0.4.0: …`。升级前请先读 [`migrating-to-0.4.md`](migrating-to-0.4.md)。
 
 ## 该动哪一项？速查
 
@@ -101,7 +104,8 @@
 - 安装与开启步骤：[`README.md`](../README.md)
 - 技术文档（机制、校验规则、能力位、限制）：[`technical.md`](technical.md)
 - 定义文件字段参考：[`README.md` · TOML 字段参考](../README.md#toml-字段参考)
-- `persona` 怎么写、`continuable` 的结论怎么回传：[`README.md` · 写 persona 时的要求](../README.md#写-persona-时的要求决定父会话能拿到什么)
+- 0.4.0 升级（`persona` / `[tools]` → Agent Preset）：[`migrating-to-0.4.md`](migrating-to-0.4.md)
+- `continuable` 的结论怎么回传：[`README.md` · 继续一个 continuable 子代理](../README.md#继续一个-continuable-子代理依赖官方控制工具)
 - 逐键注释的完整示例：[`explorer.toml`](explorer.toml)、[`reviewer.toml`](reviewer.toml)
 
 ## 附：让 AI 代写定义时的对照表
@@ -110,12 +114,16 @@
 
 | 症状 | 原因 | 怎么改 |
 |---|---|---|
-| 子代理"跑完了但父会话什么也没拿到" | `continuable` 只回传**收尾消息的文本**，而 `persona` 没要求把结论写进收尾 | 在 `persona` 里明确「收尾消息给结论 + 证据 + 未解决问题」 |
+| 子代理"跑完了但父会话什么也没拿到" | `continuable` 只回传**收尾消息的文本**，而所选 preset 的 persona 没要求把结论写进收尾 | 在 preset 的 `@deepseek-ai/dsh-persona` 行里明确「收尾消息给结论 + 证据 + 未解决问题」 |
 | 中途发现没传回父会话 | 中途的工具输出与思考**不在**结算通知里 | 需要提前通知时，要求它 `send_message(agent_id = 父代理 id)`（该 id 由宿主注入子代理任务提示）。发送方会同步拿到**投递确认**（失败可见、可重发），注意确认不等于答复 |
-| 父会话同时收到两份重叠内容 | `persona` 只说"中途先发一条"，没说"只发增量"，子代理把整份结论中途也发了一遍 | 在 `persona` 里写明：中途只发**会改变父代理下一步决策的那一条增量**，完整结论只放收尾消息。两种形态的区分见 [README · 继续一个 continuable 子代理](../README.md#继续一个-continuable-子代理依赖官方控制工具) |
-| 定义在列表里消失 | 该文件解析失败（未知键、`max_depth = 0`、`[tools]` 写了不存在的名字等） | 看工具描述里的 `Unavailable definitions:` 或 Host 日志；其余定义不受影响 |
+| 父会话同时收到两份重叠内容 | persona 只说"中途先发一条"，没说"只发增量"，子代理把整份结论中途也发了一遍 | 在 persona 里写明：中途只发**会改变父代理下一步决策的那一条增量**，完整结论只放收尾消息。两种形态的区分见 [README · 继续一个 continuable 子代理](../README.md#继续一个-continuable-子代理依赖官方控制工具) |
+| 定义在列表里消失 | 该文件解析失败（未知键、`max_depth = 0`、写了 `persona` 或 `[tools]` 这类 0.4.0 已移除的键等） | 看工具描述里的 `Unavailable definitions:` 或 Host 日志；其余定义不受影响。**若那是你唯一的定义，工具会整体消失** |
+| 升级 0.4.0 后委派工具不见了 | 唯一/全部定义都因为 `persona`、`[tools]` 被判失败，于是没有可用定义、不注册工具 | 按日志里的迁移提示改写（见 [`migrating-to-0.4.md`](migrating-to-0.4.md)） |
 | 定义在项目里不生效 | 项目级定义需要打开**信任项目级定义** | 打开该开关即可，保存后当期会话立即生效（无需重启） |
+| 委派报 `mounts no agent-presets service` | 该组合（典型是 headless）没有挂载 preset 注册表，而定义写了 `agent_preset` | 给 profile 补上 `@deepseek-ai/dsh-agent-preset-registry` 行（见 [`migrating-to-0.4.md`](migrating-to-0.4.md)），或去掉 `agent_preset` |
+| 委派报 `names agent preset "x", which is not registered` | preset id 写错，或该 preset 没在这个 profile 里声明 | 按报错里列出的可用 id 改正；工具描述里也会列出可用 preset |
+| 委派报 `independent agent preset selection is unsupported by this provider` | `fork` 继承父上下文，不能选独立 preset | 把该定义的 `provider` 改成 `spawn` |
 | 想让子代理报结构化结果却报错 | `output_schema` 只能配 `one-shot` | 改成 `one-shot`，或去掉 `output_schema` |
-| 配了 `output_schema` 却像"没结果" | 这类子代理被要求用工具交值而不以文本收尾，返回值本身就是那段 JSON | 正常现象；若要散文结论，另在 `persona` 里要求它追加一段总结文本 |
+| 配了 `output_schema` 却像"没结果" | 这类子代理被要求用工具交值而不以文本收尾，返回值本身就是那段 JSON | 正常现象；若要散文结论，另在 preset 的 persona 里要求它追加一段总结文本 |
 | 用 `acp`/`codex`/`claude-code` 时莫名报"不支持深度上限" | 旧版本会给这些 provider 也下发 Host 的隐式深度上限，而它们没有 `depthLimit` | 升级到 0.3.0+：不写 `max_depth` 时不再下发隐式上限 |
-| 委派报"不支持的能力" | provider 能力位不匹配（如 `acp` 不支持 `persona`/`model`） | 换 `spawn`/`fork`，或去掉该字段 |
+| 委派报"不支持的能力" | provider 能力位不匹配（如 `acp` 不支持 `agent_preset`/`model`） | 换 `spawn`，或去掉该字段 |

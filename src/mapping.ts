@@ -43,16 +43,12 @@ export const CAPABILITY_RULES: readonly {
     supports: provider => provider.capabilities.agentOptions,
   },
   {
-    id: 'persona',
-    reason: 'persona is unsupported by this provider',
-    asks: definition => definition.persona !== undefined,
-    supports: provider => provider.capabilities.persona,
-  },
-  {
-    id: 'toolFilter',
-    reason: 'tool filtering is unsupported by this provider',
-    asks: definition => definition.tools !== undefined,
-    supports: provider => provider.capabilities.toolFilter,
+    // The Harness rejects a preset on a provider without the bit and on any
+    // provider that inherits the parent's context, so the check mirrors both.
+    id: 'agentPreset',
+    reason: 'independent agent preset selection is unsupported by this provider',
+    asks: definition => definition.agentPreset !== undefined,
+    supports: provider => provider.capabilities.agentPreset && !provider.inheritsParentContext,
   },
   {
     id: 'depthLimit',
@@ -139,39 +135,37 @@ interface ChildInput {
   readonly maxDepth: number | undefined
 }
 
-/** {@link ChildInput} plus the cancellation channel a one-shot run owns. */
-interface RunInput extends ChildInput {
-  readonly signal: AbortSignal
-}
+/**
+ * The request portion of an activation spec: everything the child starts with
+ * except the label and cancellation, which the spec carries instead.
+ */
+export type ActivationRequest = SubagentStartRequest
 
-/** Fields shared by one-shot and continuable requests. */
-type ChildRequestFields = Omit<SubagentStartRequest, 'label' | 'prompt' | 'parent' | 'signal' | 'outputSchema'>
+/** Request fields this plugin fills in; `prompt` and `parent` are added per call. */
+type ChildRequestFields = Omit<ActivationRequest, 'prompt' | 'parent'>
 
 function requestFields(input: ChildInput): ChildRequestFields {
   const { definition, maxDepth } = input
   const agentOptions = buildAgentOptions(definition)
   return {
     ...agentOptions === undefined ? {} : { agentOptions },
-    ...definition.persona === undefined ? {} : { persona: definition.persona },
-    ...definition.tools === undefined ? {} : { toolFilter: definition.tools },
+    ...definition.agentPreset === undefined ? {} : { agentPreset: definition.agentPreset },
     ...maxDepth === undefined ? {} : { maxDepth },
   }
 }
 
 /**
  * Build the one-shot request for a definition.
- * @param input - definition, calling Agent, cancellation, and resolved depth cap.
+ * @param input - definition, calling Agent, and resolved depth cap.
  * @param prompt - the model's delegation prompt.
- * @param label - the model's short delegation label.
- * @returns the provider-facing start request.
+ * @returns the provider-facing start request; the label and cancellation belong
+ * to the activation spec, not to the request.
  */
-export function buildRunRequest(input: RunInput, prompt: string, label: string): SubagentStartRequest {
+export function buildRunRequest(input: ChildInput, prompt: string): ActivationRequest {
   const { definition } = input
   return {
-    label,
     prompt: [{ type: 'text', text: prompt }],
     parent: input.parent,
-    signal: input.signal,
     ...requestFields(input),
     ...definition.outputSchema === undefined ? {} : { outputSchema: definition.outputSchema },
   }
@@ -185,10 +179,7 @@ export function buildRunRequest(input: RunInput, prompt: string, label: string):
  * @param prompt - the model's delegation prompt.
  * @returns the request portion of a continuable start spec.
  */
-export function buildContinuableRequest(
-  input: ChildInput,
-  prompt: string,
-): Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema'> {
+export function buildContinuableRequest(input: ChildInput, prompt: string): ActivationRequest {
   return { prompt: [{ type: 'text', text: prompt }], parent: input.parent, ...requestFields(input) }
 }
 

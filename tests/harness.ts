@@ -9,33 +9,44 @@ import { basename, dirname, resolve } from 'node:path'
 import type { DiscoveryIo } from '../src/discovery.ts'
 import type {
   AgentLike,
+  AgentPresetRosterLike,
+  AgentPresetSummaryLike,
   ContextLike,
   SkillProviderLike,
   SkillRegistryLike,
+  SubagentActivationSpec,
   SubagentCapabilities,
   SubagentProvider,
   SubagentResult,
   SubagentService,
-  SubagentStartRequest,
   ToolDefinition,
 } from '../src/host.ts'
 
-/** Every start-time feature supported. */
+/** Every start-time feature supported, as the in-process `spawn` transport declares them. */
 export const FULL_CAPABILITIES: SubagentCapabilities = {
   agentOptions: true,
+  agentPreset: true,
   outputSchema: true,
   depthLimit: true,
-  toolFilter: true,
-  persona: true,
 }
 
 /** Out-of-process transport: no start-time features at all. */
 export const NO_CAPABILITIES: SubagentCapabilities = {
   agentOptions: false,
+  agentPreset: false,
   outputSchema: false,
   depthLimit: false,
-  toolFilter: false,
-  persona: false,
+}
+
+/**
+ * The `fork` transport: everything except an independent preset, because it
+ * inherits the parent's context and the Harness rejects a preset there.
+ */
+export const FORK_CAPABILITIES: SubagentCapabilities = {
+  agentOptions: true,
+  agentPreset: false,
+  outputSchema: true,
+  depthLimit: true,
 }
 
 /** One provider to register on the fake service. */
@@ -46,23 +57,18 @@ export interface FakeProviderInit {
   readonly continuable?: boolean
 }
 
-/** One observed one-shot run. */
+/** One observed activation. */
 export interface StartedRun {
-  readonly name: string
-  readonly request: SubagentStartRequest
+  readonly spec: SubagentActivationSpec
+  /** Whether the activation's own teardown ran. */
   disposed: boolean
 }
 
 /** Fake `ctx.subagents`. */
 export interface FakeSubagents {
   readonly service: SubagentService
+  /** Every activation this service was asked to start, in call order. */
   readonly started: StartedRun[]
-  readonly continuable: {
-    readonly provider: string
-    readonly label: string
-    readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema'>
-    readonly signal: AbortSignal
-  }[]
   /**
    * Read the service's shared depth policy the way the plugin's harness adapter
    * does, so a test can drop `resolveMaxDepth` and observe the older-runtime path.
@@ -75,14 +81,13 @@ export interface FakeSubagents {
  * Build a fake subagent registry.
  * @param providers - providers to register.
  * @param options - terminal result for one-shot runs and the host depth setting.
- * @returns the service plus the runs it observed.
+ * @returns the service plus the activations it observed.
  */
 export function createFakeSubagents(
   providers: readonly FakeProviderInit[],
   options: { readonly result?: SubagentResult; readonly depth?: number } = {},
 ): FakeSubagents {
   const started: StartedRun[] = []
-  const continuable: FakeSubagents['continuable'][number][] = []
   const registry = new Map<string, SubagentProvider>()
   for (const init of providers) {
     registry.set(init.name, {
@@ -96,11 +101,12 @@ export function createFakeSubagents(
   const service: SubagentService = {
     getProvider: name => registry.get(name),
     list: () => [...registry.keys()],
-    start(name, request) {
-      const entry: StartedRun = { name, request, disposed: false }
+    startActivation(spec) {
+      const entry: StartedRun = { spec, disposed: false }
       started.push(entry)
       return Promise.resolve({
-        id: `run-${started.length}`,
+        childId: `child-${started.length}`,
+        messageId: 'message-1',
         result: Promise.resolve(result),
         dispose: () => {
           entry.disposed = true
@@ -108,18 +114,22 @@ export function createFakeSubagents(
         },
       })
     },
-    startContinuable(spec) {
-      continuable.push(spec)
-      return Promise.resolve({ childId: `child-${continuable.length}`, messageId: 'message-1' })
-    },
     resolveMaxDepth: () => options.depth ?? 1,
   }
   return {
     service,
     started,
-    continuable,
     hostDepth: () => (typeof service.resolveMaxDepth === 'function' ? service.resolveMaxDepth(undefined) : undefined),
   }
+}
+
+/**
+ * Build a fake `ctx.agentPresets` roster.
+ * @param rows - presets the roster reports.
+ * @returns the roster.
+ */
+export function createFakePresets(rows: readonly AgentPresetSummaryLike[]): AgentPresetRosterLike {
+  return { list: () => Promise.resolve([...rows]) }
 }
 
 /** One tool registration observed on the fake context. */
@@ -159,9 +169,13 @@ export interface FakeSkillRegistration {
 /**
  * Build a fake context with a fake subagent registry.
  * @param subagents - fake service.
+ * @param options - extra services this composition exposes.
  * @returns the context plus everything it recorded.
  */
-export function createFakeContext(subagents: SubagentService): FakeContext {
+export function createFakeContext(
+  subagents: SubagentService,
+  options: { readonly presets?: AgentPresetRosterLike | undefined } = {},
+): FakeContext {
   const tools: RegisteredTool[] = []
   const logs: FakeContext['logs'][number][] = []
   const fibers: FakeContext['fibers'][number][] = []
@@ -213,7 +227,9 @@ export function createFakeContext(subagents: SubagentService): FakeContext {
       }
     },
     get(name) {
-      return name === 'agents' ? { list: () => [...registry] } : undefined
+      if (name === 'agents') return { list: () => [...registry] }
+      if (name === 'agentPresets') return options.presets
+      return undefined
     },
     inject(services, callback) {
       const first = tools.length

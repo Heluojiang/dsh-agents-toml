@@ -9,7 +9,14 @@
  */
 import type { DefinitionFailure } from './definitions.ts'
 import type { DiscoveryResult } from './discovery.ts'
-import type { AgentLike, ContentBlock, JsonValue, SubagentService, ToolDefinition } from './host.ts'
+import type {
+  AgentLike,
+  AgentPresetRosterLike,
+  ContentBlock,
+  JsonValue,
+  SubagentService,
+  ToolDefinition,
+} from './host.ts'
 import {
   buildContinuableRequest,
   buildRunRequest,
@@ -30,8 +37,14 @@ export interface InstalledSubagent {
   readonly name: string
   /** The definition's routing hint, shown to the model beside its name. */
   readonly description: string
-  /** Whether this definition starts its child in the background. */
+  /**
+   * Whether this definition starts its child in the background.
+   */
   readonly continuable: boolean
+  /**
+   * The Agent Preset this definition composes its child from, when it names one.
+   */
+  readonly agentPreset?: string | undefined
   /**
    * Whether this definition's transport seeds the child with the parent's
    * completed turns. The provider registry is read at install time; a
@@ -50,6 +63,11 @@ export interface DelegationToolOptions {
   readonly reportFailuresToModel: boolean
   readonly subagents: SubagentService
   /**
+   * The Agent Preset roster, read at call time to check an `agent_preset`
+   * value; `undefined` on a composition that mounts no `agent-presets` service.
+   */
+  readonly presets?: AgentPresetRosterLike | undefined
+  /**
    * The Host's configured delegation depth, read at call time.
    * @returns the depth, or `undefined` on a runtime without a shared policy.
    */
@@ -60,6 +78,11 @@ export interface DelegationToolOptions {
   readonly installed: readonly InstalledSubagent[]
   /** Failures known when this instance was installed. */
   readonly installedFailures: readonly DefinitionFailure[]
+  /**
+   * Agent Preset ids the roster reported at install time, when any installed
+   * definition selects one; an empty list means the roster answered with none.
+   */
+  readonly installedPresets?: readonly string[] | undefined
 }
 
 /** Validated tool arguments. */
@@ -112,6 +135,39 @@ function unknownAgentTypeMessage(requested: string, discovery: DiscoveryResult):
     : `unknown subagent "${requested}"; configured subagents: ${available.join(', ')}`
 }
 
+/**
+ * Reject a definition whose `agent_preset` this composition cannot serve.
+ *
+ * A missing roster and an unknown id are different problems with different
+ * fixes — the first is a deployment that does not mount the preset service (the
+ * packaged headless bundle does not), the second is a mistyped or undeclared
+ * preset — so they get different text. The check runs here rather than at load
+ * because the roster is a runtime fact, and because presets may be registered
+ * by rows that activate after this one.
+ * @param agentType - the definition's name, for the message.
+ * @param wanted - the preset id the definition names.
+ * @param presets - the roster, or `undefined` when the composition mounts none.
+ */
+async function assertPreset(
+  agentType: string,
+  wanted: string,
+  presets: AgentPresetRosterLike | undefined,
+): Promise<void> {
+  if (presets === undefined) {
+    throw new Error(
+      `subagent "${agentType}" sets agent_preset = "${wanted}", but this composition mounts no agent-presets `
+      + 'service; the packaged web bundle mounts it and the headless bundle does not',
+    )
+  }
+  const rows = await presets.list()
+  if (rows.some(row => row.id === wanted)) return
+  const ids = rows.map(row => row.id)
+  throw new Error(
+    `subagent "${agentType}" names agent preset "${wanted}", which is not registered; available agent presets: `
+    + (ids.length === 0 ? '(none)' : ids.join(', ')),
+  )
+}
+
 function buildDescription(options: DelegationToolOptions): string {
   const names = options.installed.map(entry => entry.name)
   const parts = [
@@ -139,6 +195,15 @@ function buildDescription(options: DelegationToolOptions): string {
     )
   }
   if (names.length > 0) parts.push(`Configured subagents: ${names.join(', ')}.`)
+  if (options.installed.some(entry => entry.agentPreset !== undefined)) {
+    // The ids are the only legal `agent_preset` values a definition can name, so
+    // the model's own view of this tool lists them rather than letting a typo in
+    // a definition surface as one failed delegation.
+    const presets = options.installedPresets ?? []
+    parts.push(
+      `Agent presets available in this composition: ${presets.length === 0 ? '(none)' : presets.join(', ')}.`,
+    )
+  }
   if (options.reportFailuresToModel && options.installedFailures.length > 0) {
     const unavailable = options.installedFailures
       .map(failure => `${failure.name ?? failure.file} (${failure.reason})`)
@@ -230,34 +295,44 @@ export function buildDelegationTool(options: DelegationToolOptions): ToolDefinit
       if (reason !== undefined) {
         throw new Error(`subagent "${agentType}" cannot run on provider "${providerName}": ${reason}`)
       }
+      if (definition.agentPreset !== undefined) await assertPreset(agentType, definition.agentPreset, options.presets)
 
       exec.signal.throwIfAborted()
       const maxDepth = depthFor(definition, provider, options.hostDepth())
       const child = { definition, parent, maxDepth }
 
       if (definition.mode === 'continuable') {
-        const started = await subagents.startContinuable({
+        // `delivery: 'parent'` is the activation that keeps running in the
+        // background and notifies the parent when it settles; the caller's own
+        // result carries the child id and nothing else.
+        const activation = await subagents.startActivation({
           provider: providerName,
           label: description,
           request: buildContinuableRequest(child, prompt),
           signal: exec.signal,
+          delivery: 'parent',
         })
-        return { text: `started subagent ${String(started.childId)}` }
+        return { text: `started subagent ${String(activation.childId)}` }
       }
 
-      const run = await subagents.start(
-        providerName,
-        buildRunRequest({ ...child, signal: exec.signal }, prompt, description),
-      )
+      // `delivery: 'caller'` resolves the child's result to this call only, which
+      // is exactly the one-shot contract; the activation is disposed afterwards.
+      const activation = await subagents.startActivation({
+        provider: providerName,
+        label: description,
+        request: buildRunRequest(child, prompt),
+        signal: exec.signal,
+        delivery: 'caller',
+      })
       try {
         const described = describeResult(
-          await run.result,
+          await activation.result,
           { expectStructured: definition.outputSchema !== undefined },
         )
         if (!described.ok) throw new Error(described.error)
         return { text: described.text }
       } finally {
-        await run.dispose()
+        await activation.dispose()
       }
     },
   }

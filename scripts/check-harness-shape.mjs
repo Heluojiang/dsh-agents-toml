@@ -73,20 +73,30 @@ if (!existsSync(join(base, 'dsh-subagent'))) {
 
 /**
  * One declaration the plugin relies on.
- * @typedef {{ file: string, contains: string, why: string }} Requirement
+ *
+ * `optional` marks a client-side artifact that only a fuller installation
+ * carries: a bare `@deepseek-ai/dsh` install ships the browser packages the Web
+ * frontend bundles (they are platform modules), so their declarations may be
+ * absent from disk. Absent is then reported as SKIP, while a present file that
+ * lost the name is still drift.
+ * @typedef {{ file: string, contains: string, why: string, optional?: boolean }} Requirement
  */
 
 /** @type {readonly Requirement[]} */
 const REQUIREMENTS = [
   // dsh-subagent: the service definition the plugin calls.
-  { file: 'dsh-subagent/lib/types/index.d.ts', contains: 'start(name: string, request: SubagentStartRequest)', why: 'subagents.start' },
-  { file: 'dsh-subagent/lib/types/index.d.ts', contains: 'startContinuable(spec: ContinuableStartSpec)', why: 'subagents.startContinuable' },
+  { file: 'dsh-subagent/lib/types/index.d.ts', contains: 'startActivation(spec: SubagentActivationSpec)', why: 'subagents.startActivation' },
   { file: 'dsh-subagent/lib/types/index.d.ts', contains: 'getProvider(name: string)', why: 'subagents.getProvider' },
   { file: 'dsh-subagent/lib/types/index.d.ts', contains: 'resolveMaxDepth(', why: 'the shared delegation-depth policy' },
+  { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'readonly delivery:', why: 'the activation delivery mode' },
+  { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'readonly agentPreset?', why: 'an independent Agent Preset on a start request' },
   { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'readonly structured?:', why: 'a structured child result' },
+  { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'readonly agentPreset:', why: 'the agentPreset capability bit' },
   { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'readonly depthLimit:', why: 'the depthLimit capability bit' },
   { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'readonly inheritsParentContext:', why: 'the conversation-sharing descriptor' },
   { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'prepareContinuable?', why: 'the continuable capability signal' },
+  // dsh-agent-preset-registry: the roster an `agent_preset` value is checked against.
+  { file: 'dsh-agent-preset-registry/lib/types/index.d.ts', contains: 'list()', why: 'agentPresets.list' },
   // cordis-plugin-loader: the only signal a volatile settings write reaches the
   // plugin through, because such a write does not remount the row.
   { file: 'cordis-plugin-loader/lib/index.js', contains: 'loader/volatile-update', why: 'the volatile settings-write event' },
@@ -94,20 +104,42 @@ const REQUIREMENTS = [
   { file: 'dsh-skill/lib/types/index.d.ts', contains: 'registerProvider(', why: 'skills.registerProvider' },
   // dsh-api-remotes: the event the client half refreshes on.
   { file: 'dsh-api-remotes/lib/index.js', contains: 'plugin-manager/changed', why: 'the forwarded plugin-manager change event' },
-  // dsh-api-gateway: how a Remote namespace becomes a service.
-  { file: 'dsh-api-gateway/lib/client.js', contains: '`remote.${namespace}`', why: 'the remote.<namespace> service key' },
+  // dsh-api-gateway: how a Remote namespace becomes a service. Since 0.2.1 the
+  // client bundle is split by platform, so the browser artifact is the one to read.
+  { file: 'dsh-api-gateway/lib/client.browser.js', contains: '`remote.${namespace}`', why: 'the remote.<namespace> service key' },
   // dsh-plugin-manager: the inventory the warning reads.
   { file: 'dsh-plugin-manager/lib/types/index.d.ts', contains: 'listBundles()', why: 'pluginManager.listBundles' },
   { file: 'dsh-plugin-manager/lib/types/index.d.ts', contains: 'listPlugins()', why: 'pluginManager.listPlugins' },
   // The Agent Teams packages the client half detects.
   { file: 'dsh-experimental-agent-team/package.json', contains: '"name"', why: 'the Agent Teams module name' },
   { file: 'dsh-experimental-tool-agent-team/package.json', contains: '"name"', why: 'the Agent Teams tool module name' },
+  // The client half: hand-declared in src/client/shell-modules.d.ts, so nothing
+  // else in this repository would notice these names moving. These packages are
+  // platform modules the Web frontend bundles, so a bare install may not carry
+  // them on disk — hence `optional`: present means checked, absent means SKIP.
+  { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'SettingsForm', why: 'the settings card component', optional: true },
+  { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'SettingsValueField', why: 'the settings card field', optional: true },
+  { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'SettingsFormModel', why: 'the settings form model', optional: true },
+  { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'settingsTextField', why: 'the text-field spec', optional: true },
+  { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'Switch', why: 'the boolean switch', optional: true },
+  { file: 'dsh-client-store/lib/types/index.d.ts', contains: 'createSnapshotStore', why: 'the card snapshot store', optional: true },
+  { file: 'dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts', contains: 'plugins.bundle.config', why: 'the bundle config slot the card registers', optional: true },
+  // The rest of the client half's contract, read off the packages the Host serves.
+  { file: 'dsh-client-ui-settings/lib/types/client/config-form.d.ts', contains: 'whileServed', why: 'configForms.whileServed', optional: true },
+  // dsh-plugin-manager, client-facing: the field the Agent Teams warning reads.
+  { file: 'dsh-plugin-manager/lib/types/types.d.ts', contains: 'moduleName', why: 'the plugin inventory module name' },
 ]
 
 const drifts = []
+let skipped = 0
 for (const requirement of REQUIREMENTS) {
   const path = join(base, requirement.file)
   if (!existsSync(path)) {
+    if (requirement.optional === true) {
+      skipped += 1
+      console.log(`SKIP ${requirement.file} :: ${requirement.why} (not installed in this tree)`)
+      continue
+    }
     drifts.push(`${requirement.file}: file is missing (needed for ${requirement.why})`)
     continue
   }
@@ -119,11 +151,13 @@ for (const requirement of REQUIREMENTS) {
   console.log(`OK   ${requirement.file} :: ${requirement.why}`)
 }
 
+const summary = `${REQUIREMENTS.length - skipped} declaration(s) match the installed Harness at ${base}`
+  + (skipped === 0 ? '' : `; ${skipped} client-side declaration(s) skipped as not installed`)
 if (drifts.length > 0) {
   console.error(`\ncheck:harness: ${drifts.length} drift(s) against the installed Harness at ${base}`)
   for (const drift of drifts) console.error(`  DRIFT ${drift}`)
   console.error('\nUpdate src/host.ts, src/harness.ts, and the client half for the new declarations, then rerun.')
   process.exitCode = 1
 } else {
-  console.log(`\ncheck:harness: ${REQUIREMENTS.length} declarations match the installed Harness at ${base}`)
+  console.log(`\ncheck:harness: ${summary}`)
 }

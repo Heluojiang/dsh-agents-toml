@@ -18,11 +18,14 @@ import {
   createSkillProvider, parseSkillAsset, readSkillAsset,
   DEFAULT_SKILL_ASSETS, SKILL_NAME, SKILL_PROVIDER, SKILL_RANK,
 } from '../src/skill.ts'
-import { createFakeContext, createFakeSubagents, FULL_CAPABILITIES } from './harness.ts'
+import { createFakeContext, createFakePresets, createFakeSubagents, FULL_CAPABILITIES } from './harness.ts'
 
 /** A fake context with a skills service, without touching the filesystem. */
 function bench(): ReturnType<typeof createFakeContext> {
-  return createFakeContext(createFakeSubagents([{ name: 'spawn', capabilities: FULL_CAPABILITIES }]).service)
+  return createFakeContext(
+    createFakeSubagents([{ name: 'spawn', capabilities: FULL_CAPABILITIES }]).service,
+    { presets: createFakePresets([{ id: 'standard' }]) },
+  )
 }
 
 const signal = (): AbortSignal => new AbortController().signal
@@ -36,14 +39,14 @@ test('the packaged asset parses into a described body without its frontmatter', 
   assert.match(asset.content, /max_depth/)
 })
 
-test('the asset states how a continuable run reports back, since that decides the persona', () => {
+test('the asset states how a continuable run reports back, since that decides the preset persona', () => {
   const { content } = readSkillAsset()
   // The settlement notice is what the parent actually receives, so the authoring
-  // guide must say so where it describes the mode and where it tells the model
-  // how to write the persona.
+  // guide must say so where it describes the mode and where it points at the
+  // preset that carries the child's persona.
   assert.match(content, /settlement notice/)
   assert.match(content, /closing message/)
-  assert.match(content, /## 4b\. Writing the `persona` for the mode you chose/)
+  assert.match(content, /## 4b\. Putting the persona in an Agent Preset/)
   // A mid-run `send_message` looks different from the settlement notice, and a
   // persona told merely to "send something early" makes the child re-send its
   // whole conclusion. Both facts have to be stated where the persona is written.

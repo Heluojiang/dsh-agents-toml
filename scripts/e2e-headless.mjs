@@ -1,10 +1,11 @@
-// Keyed scenario: does a real delegation through the project's own definitions
-// behave the way the project rules describe?
+// Delegation scenario: does a real delegation through the project's own
+// definitions behave the way the project rules describe?
 //
-// This runs the built `dsh` CLI against a real provider, so it needs credentials
-// (`E2E_API_KEY`, optional `E2E_BASE_URL`). Every assertion reads the session log
-// rather than the model's prose: the recorded request headers are what the model
-// was actually offered.
+// This runs the built `dsh` CLI against whatever provider the caller points it
+// at. `scripts/e2e.mjs` supplies either a real key (`E2E_API_KEY`, optional
+// `E2E_BASE_URL`) or its own scripted model stub; this module only needs a base
+// URL and a token. Every assertion reads the session log rather than the model's
+// prose: the recorded request headers are what the model was actually offered.
 //
 // The project under test is never modified. `scripts/e2e.mjs` owns the guard that
 // proves it.
@@ -13,6 +14,15 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+
+/**
+ * The marker the throwaway profile's example preset puts in its persona prefix.
+ *
+ * Asserting on a marker rather than on prose keeps the check independent of what
+ * the model says: the marker can only reach the child's system prompt if the
+ * Agent Preset was actually mounted for that child.
+ */
+export const PRESET_MARKER = 'E2E-PRESET-PERSONA'
 
 /** Decode a DSH session log: concatenated zstd frames, one JSONL chunk each. */
 export function readSession(dir) {
@@ -80,21 +90,26 @@ export function definitionNames(project) {
 }
 
 /**
- * Pick the definition whose `[tools] deny` list is non-empty, so the scenario
- * can assert that the removal shows up in the child's recorded tool table.
+ * Pick the definition that selects an Agent Preset, so the scenario can assert
+ * that this child really was composed from it.
+ *
+ * 0.4.0 replaced the per-child `persona` and `[tools]` fields with
+ * `agent_preset`, so "the composition reached the child" is now proven by the
+ * preset's own persona text showing up in the child's system prompt.
  * @param project - the project holding `.dsh/agents`.
- * @returns the definition's name and deny list, or `undefined` when none denies anything.
+ * @returns the definition's name, its `mode`, and the preset it selects, or `undefined`.
  */
-export function deniedDefinition(project) {
+export function presetDefinition(project) {
   const agents = join(project, '.dsh', 'agents')
   if (!existsSync(agents)) return undefined
   for (const file of readdirSync(agents).filter(name => name.endsWith('.toml')).sort()) {
     const source = readFileSync(join(agents, file), 'utf8')
     const name = /^\s*name\s*=\s*"([^"]+)"/m.exec(source)?.[1]
-    const block = /^\s*deny\s*=\s*\[([^\]]*)\]/m.exec(source)?.[1]
-    if (name === undefined || block === undefined) continue
-    const names = [...block.matchAll(/"([^"]+)"/g)].map(match => match[1])
-    if (names.length > 0) return { name, denies: names }
+    const preset = /^\s*agent[_-]preset\s*=\s*"([^"]+)"/m.exec(source)?.[1]
+    if (name === undefined || preset === undefined) continue
+    // `mode` decides which activation the tool must use, so the scenario checks
+    // the recorded mode against the definition that was delegated to.
+    return { name, preset, mode: /^\s*mode\s*=\s*"([^"]+)"/m.exec(source)?.[1] ?? 'one-shot' }
   }
   return undefined
 }
@@ -102,14 +117,28 @@ export function deniedDefinition(project) {
 const textOf = event => (event.data?.message?.content ?? []).map(part => part?.text ?? '').join('')
 
 /**
+ * Every text part of a message event, whichever envelope carries it.
+ *
+ * A `system/message` nests its content under `message`; a `user/message` — which
+ * is how the workspace instructions are injected — puts `content` on the event
+ * data directly. Reading only one shape makes a real injection look absent.
+ * @param event - a persisted session event.
+ * @returns the concatenated text parts.
+ */
+const messageText = event => [
+  ...(event.data?.message?.content ?? []),
+  ...(event.data?.content ?? []),
+].map(part => part?.text ?? '').join('')
+
+/**
  * Run the keyed scenario.
  * @param options - `dshRoot` of the Harness installation, home, profile, project root,
- * provider credentials, the delegated definition whose `deny` list is under test, and
+ * provider credentials, the delegated definition whose Agent Preset is under test, and
  * the prompt to send.
  * @returns the checks and their failures.
  */
 export function runHeadlessScenario(options) {
-  const { dshRoot, home, profile, project, prompt, apiKey, baseUrl, denied, log = console.log } = options
+  const { dshRoot, home, profile, project, prompt, apiKey, baseUrl, preset, log = console.log } = options
   const results = []
   const check = (id, ok, detail) => {
     results.push({ id, ok, detail })
@@ -166,9 +195,31 @@ export function runHeadlessScenario(options) {
     'every definition name appears in the agent_type hint')
 
   const catalog = events.filter(event => event.type === 'subagent/catalog')
-  check('the delegation was recorded with a child and a mode',
+  check('the delegation was recorded with a child',
     catalog.length > 0 && typeof catalog[0].data?.childId === 'string',
     `subagent/catalog=${JSON.stringify(catalog.map(event => ({ mode: event.data?.mode, childId: event.data?.childId })))}`)
+
+  // The definition's `mode` does NOT reach `subagent/catalog`: that field reports
+  // whether the *transport* can cold-resume (the local `spawn` provider always
+  // can, so it always says `continuable`). What the definition's `mode` decides is
+  // `delivery`, and the only place that becomes visible is the tool's own result:
+  // `parent` delivery hands back a child id, `caller` delivery hands back the
+  // child's answer. Asserting on this text is what proves the right branch ran.
+  // The Messages shapes a tool result as `{ message: { toolCallId, content } }`,
+  // so the call id lives one level down rather than beside the turn numbers.
+  const call = events.find(event => event.type === 'tool/call' && event.data?.name === 'subagent_custom')
+  const callId = call?.data?.callId
+  const toolResult = events
+    .filter(event => event.type === 'tool/result' && event.data?.message?.toolCallId === callId)
+    .map(event => (event.data?.message?.content ?? []).map(part => part?.text ?? '').join(''))
+    .at(-1) ?? ''
+  const continuable = preset?.mode === 'continuable'
+  check(`${continuable ? 'a continuable' : 'a one-shot'} definition returns `
+    + `${continuable ? 'only a child id' : 'the child\'s answer, not a child id'}`,
+  continuable
+    ? /^started subagent \S+$/u.test(toolResult.trim())
+    : toolResult.trim().length > 0 && !toolResult.includes('started subagent'),
+  `tool/result of ${String(callId)}=${JSON.stringify(toolResult.slice(0, 160))}`)
 
   const childId = catalog[0]?.data?.childId
   const child = childId === undefined
@@ -176,18 +227,38 @@ export function runHeadlessScenario(options) {
     : logs.find(entry => entry.name.includes(childId))
   if (child !== undefined) {
     const childEvents = child.events
-    const childHeader = childEvents.find(event => event.type === 'request/header')
-    const childTools = childHeader === undefined ? [] : headerOf(childHeader)
-    const present = (denied?.denies ?? []).filter(name => childTools.some(tool => tool.name === name))
-    check(`the child's tool table omits the denied tools of "${denied?.name ?? 'the delegated definition'}"`,
-      denied !== undefined && present.length === 0,
-      denied === undefined
-        ? 'no project definition denies any tool, so nothing to prove'
-        : `child offers ${childTools.length} tools; ${denied.denies.join('/')} ${present.length === 0 ? 'absent' : `present: ${present.join(', ')}`}`)
-    const injected = childEvents.some(event => event.type === 'system/message' && textOf(event).includes('AGENTS.md'))
+    // Independent selection: a creation-time preset is recorded before the child's
+    // own descriptor, which is exactly the rule the Harness itself uses to tell an
+    // independent selection from a resumed historical one.
+    const descriptorAt = childEvents.findIndex(event => event.type === 'subagent/descriptor')
+    const selectedAt = childEvents.findIndex(event => event.type === 'agent-preset/selected')
+    const selected = selectedAt === -1 ? undefined : childEvents[selectedAt]
+    check(`the child was composed from Agent Preset "${preset?.preset ?? '?'}"`,
+      selected !== undefined
+      && selected.data?.agentPreset === preset?.preset
+      && (descriptorAt === -1 || selectedAt < descriptorAt),
+      selected === undefined
+        ? 'the child log records no agent-preset/selected event'
+        : `agent-preset/selected=${JSON.stringify(selected.data?.agentPreset)} at ${selectedAt}, `
+          + `subagent/descriptor at ${descriptorAt}`)
+    const renderedPrompt = childEvents.filter(event => event.type === 'system/message').map(textOf).join('\n')
+    check('the preset persona reaches the child system prompt',
+      renderedPrompt.includes(PRESET_MARKER),
+      renderedPrompt.includes(PRESET_MARKER)
+        ? `the child prompt carries "${PRESET_MARKER}"`
+        : `no system/message carries "${PRESET_MARKER}"; the profile's example preset must put that marker `
+          + 'in its persona `prefix`')
+    // The workspace instructions arrive as an `agent-instructions` user message
+    // (`<system-reminder>… Instructions from: AGENTS.md …`), not as a system
+    // message, so both surfaces are searched rather than assuming one.
+    const instructionEvent = childEvents.find(event =>
+      (event.type === 'system/message' || event.type === 'user/message')
+      && messageText(event).includes('AGENTS.md'))
     check('the project AGENTS.md reaches the child',
-      injected,
-      injected ? 'a system/message in the child log carries the workspace instructions' : 'no workspace-instruction event')
+      instructionEvent !== undefined,
+      instructionEvent === undefined
+        ? 'no message in the child log carries the workspace instructions'
+        : `a ${instructionEvent.type} at seq ${instructionEvent.seq} carries the workspace instructions`)
   } else {
     check('the child session log is readable', false, `no log for child ${String(childId)}`)
   }

@@ -53,13 +53,19 @@ export async function runLoaderScenario({ dshRoot, pluginRoot, log = console.log
     getProvider: name => (name === 'spawn'
       ? {
         name: 'spawn',
-        capabilities: { agentOptions: true, outputSchema: true, depthLimit: true, toolFilter: true, persona: true },
+        capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true },
         inheritsParentContext: false,
       }
       : undefined),
     list: () => ['spawn'],
-    start: () => Promise.resolve({ result: Promise.resolve({ output: [], stopReason: 'completed' }), dispose: () => Promise.resolve() }),
-    startContinuable: () => Promise.resolve({ childId: 'child', messageId: 'message' }),
+    // The one 0.2.1+ entry point: the spec's `delivery` decides whether the
+    // caller waits for the result or the parent is notified later.
+    startActivation: spec => Promise.resolve({
+      childId: spec.delivery === 'parent' ? 'child' : 'run',
+      messageId: 'message',
+      result: Promise.resolve({ output: [], stopReason: 'completed' }),
+      dispose: () => Promise.resolve(),
+    }),
     resolveMaxDepth: () => 1,
   })
   ctx.provide('logger', { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} })

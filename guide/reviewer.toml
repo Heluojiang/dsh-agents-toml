@@ -1,6 +1,7 @@
 # 示例 2：只读代码审查子代理
 #
-# 演示：mode = "one-shot"（等它跑完并拿回结果）+ persona + 结构化返回 + 禁止写文件的工具限制。
+# 演示：mode = "one-shot"（等它跑完并拿回结果）+ 结构化返回 + agent_preset（人设与"只读工具集"
+#      都由 preset 决定）。
 #
 # 用法：复制到 $DSH_HOME/agents/ 或已信任的 <项目根>/.dsh/agents/，下一次委派即可用
 #      agent_type = "reviewer"（无需重启）。
@@ -25,12 +26,16 @@ mode = "one-shot"
 
 # [可选] 默认取插件行 defaultProvider（默认 spawn）。spawn 不继承父对话上下文，
 #        因此 prompt 必须自包含（本插件的工具描述也这样提示模型）。
+#        只有既支持 agentPreset 能力、又不继承父上下文的 provider 才能选 preset ——
+#        spawn 可以，fork 会在委派时报"不支持独立 preset 选择"。
 provider = "spawn"
 
-# [可选] 只作用于该子代理的系统提示补充，会遮蔽部署 persona（需要 provider 能力 persona）
-persona = """
-你是资深代码审查者。只报告问题与依据，不修改文件；需要改动时在结论里说明建议。
-"""
+# [可选] 让这个子代理整体套用一个 Agent Preset（需要该 profile 挂载 agent-presets 服务）。
+#        dsh 0.2.1 起**不再有**逐子代理的 persona 与 [tools] 字段：这个子代理的人设和它能用的工具，
+#        都由它选用的 preset 决定。本例假设 profile 里已声明了 id 为 "reviewer" 的 preset，
+#        它的 plugins 里有一个 @deepseek-ai/dsh-persona 行（写下面的审查者人设）和一组只读工具行
+#        （不再挂 write / edit）。完整写法见 guide/migrating-to-0.4.md。
+agent_preset = "reviewer"
 
 # [可选] 省略则取 Host 的 subagent.maxDepth（通常为 1）。
 #        1 = 允许本次委派，但该子代理不能再往下委派（它的子代理深度会是 2 > 1）。
@@ -40,16 +45,16 @@ max_depth = 1
 #        且只能配 mode = "one-shot"）。删掉本行则返回子代理的最终文本。
 #        注意：Harness 会给这类子代理下"必须用结构化工具交值、不要以纯文本收尾"的指令，
 #        所以它的最终文本通常是空的 —— 真正的结论就在这段 JSON 里。想同时要一段散文总结，
-#        在 persona 里另外要求它写。
+#        就在 agent_preset 选用的那个 preset 的 persona 行里另外要求它写。
 output_schema = { type = "object", properties = { summary = { type = "string" }, findings = { type = "array", items = { type = "string" } } }, required = ["summary"] }
 
-# [可选] 从子代理的提示词里移除并拒绝执行这些工具（只能做减法，需要 provider 能力 toolFilter）。
-#        `write`/`edit` 在每个随发行版提供的组合里都存在，所以这两个名字可移植；
-#        shell 工具的名字因部署而异（Windows headless 是 pwsh，web 还可能有 bash/terminal），
-#        写错会在委派时报错并列出已知工具名 —— 因此 shell 的 deny 行默认注释，按你的部署取消注释。
-[tools]
-deny = ["write", "edit"]
-# deny = ["write", "edit", "pwsh"]
+# --- 已移除的键（0.4.0 起写了就会让本文件在解析期失败，并给出迁移提示）---
+# persona = """..."""
+#   dsh 0.2.1 删掉了逐子代理 persona：改在 agent_preset 选用的 preset 里放一个
+#   @deepseek-ai/dsh-persona 行（config.prefix 就是那段人设文本）。
+# [tools] deny = ["write", "edit"]
+#   dsh 0.2.1 也删掉了逐子代理工具过滤，官方没有提供替代字段 —— 唯一等价做法是让 preset
+#   只挂该子代理能用的那些工具插件行（例如不挂 write/edit），也就是"一个工具集合一个 preset"。
 
 # --- 本例未启用的可选键（按需取消注释，注意括号里的约束）---
 # 把审查也放到另一个模型上（需要 provider 能力 agentOptions：spawn / fork / dsh-sdk）：

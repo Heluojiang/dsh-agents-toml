@@ -1,6 +1,7 @@
 # 示例 1：可继续的轻量探索子代理
 #
-# 演示：mode = "continuable"（拿到子代理 id 后可反复追问）+ 子代理模型路由（跑在便宜快的模型上）。
+# 演示：mode = "continuable"（拿到子代理 id 后可反复追问）+ 子代理模型路由（跑在便宜快的模型上）
+#      + agent_preset（子代理的人设与工具集交给一个 Agent Preset）。
 #
 # 用法：复制到 $DSH_HOME/agents/ 或已信任的 <项目根>/.dsh/agents/，下一次委派即可用
 #      agent_type = "explorer"（无需重启）。
@@ -26,8 +27,8 @@ enabled = true
 #          Its closing message:
 #          <子代理最后的文本>
 #        父会话空闲会被唤醒。**只回传收尾消息的文本**：中途的工具输出、推理都不在其中 ——
-#        所以 persona 必须要求子代理把结论写在最后一条消息里（本文件的 persona 就是"检查"，
-#        若要发给父代理，取消下面 persona 段里的收尾发送要求）。
+#        所以要子代理把结论写在最后一条消息里，就在它选用的 Agent Preset 的 persona 里写明
+#        （见下面 agent_preset 一行；preset 里的 dsh-persona 会写进子代理的系统提示）。
 #        中途那条与收尾那条形态不同，不要混判：中途由子代理主动 send_message，父会话看到
 #        `Agent <子代理id> sent a message:` + 正文（只表示"还在跑，先报一件事"）；收尾由宿主
 #        自动投递 `Background subagent <id> finished …` + `Its closing message:`。要求中途提前
@@ -48,6 +49,14 @@ model = "deepseek-v4-flash"
 # reasoning_effort = "low"    # 可选：推理档位（off/low/high/max，随 provider 而定）
 # max_tokens = 8192           # 可选：正整数，子代理单次生成上限
 
+# [可选] 让这个子代理整体套用一个 Agent Preset（需要 provider 能力 agentPreset 且该 provider
+#        不继承父上下文 —— spawn 可以，fork 不行；并且该 profile 要挂载 agent-presets 服务，
+#        随发行版的 web 组合有、headless 组合没有）。
+#        dsh 0.2.1 起**不再有**逐子代理的 persona 与 [tools] 字段：子代理的人设和工具集都由它选用的
+#        preset 决定（preset 里放一个 @deepseek-ai/dsh-persona 行就是人设，放哪些工具插件行就是工具集）。
+#        写法见 guide/migrating-to-0.4.md；这里假设 profile 里已声明了 id 为 "explorer" 的 preset。
+agent_preset = "explorer"
+
 # [可选] 省略则取 Host 的 subagent.maxDepth（通常为 1）。
 #        语义：约束"本定义创建出的子代理"的绝对深度 —— 1 = 允许本次委派，但它不能再往下委派。
 #        0 永远不成立（子代理深度至少为 1），因此在解析期就判失败。
@@ -56,21 +65,14 @@ model = "deepseek-v4-flash"
 #        在不支持的 provider（如 acp/codex）上会明确报"不支持深度上限"。
 max_depth = 1
 
-# [可选] 从子代理的提示词里移除并拒绝执行这些工具（只能做减法，需要 provider 能力 toolFilter）。
-#        名字必须是**本部署真实注册**的工具：写错不会静默忽略，而是在委派时报错并列出已知工具名。
-[tools]
-deny = ["write", "edit"]
-# deny = ["write", "edit", "pwsh"]    # Windows headless / web：连 shell 一起禁掉
-# allow = ["read", "grep", "glob"]    # 也可以改用白名单：只允许这些
+# --- 已移除的键（0.4.0 起写了就会让本文件在解析期失败，并给出迁移提示）---
+# [tools] deny = ["write", "edit"]
+#   dsh 0.2.1 删掉了逐子代理的工具过滤，官方也没有提供替代字段。要"只读子代理"，
+#   就做一个只挂读工具的 preset，用上面的 agent_preset 指过去。
+# persona = """..."""
+#   同样在 dsh 0.2.1 被删除；改在 preset 里放一个 @deepseek-ai/dsh-persona 行。
 
 # --- 本例未启用的可选键（按需取消注释，注意括号里的约束）---
-# persona = """
-# 只作用于该子代理的补充系统提示，会遮蔽部署 persona。（需要 provider 能力 persona）
-#
-# continuable 定义必须要求子代理把结论写进最后一条消息，否则父会话只会收到一条空通知：
-# 收尾时给出「结论 + 证据（文件/符号/行号）+ 未解决问题」，不要只回一句"完成"。
-# 中途要提前告知时，只发那一条增量（send_message(agent_id = 父代理 id)），完整结论仍只放收尾消息。
-# """
 # output_schema = { type = "object", properties = { summary = { type = "string" } }, required = ["summary"] }
 # ↑ 让子代理返回结构化结果（需要 provider 能力 outputSchema），且**只能**配 mode = "one-shot"，
 #   与本文件上面的 continuable 互斥。

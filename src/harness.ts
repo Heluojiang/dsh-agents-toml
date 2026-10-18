@@ -11,6 +11,7 @@
  */
 import type {
   AgentLike,
+  AgentPresetRosterLike,
   AgentRegistryLike,
   ContextLike,
   FiberLike,
@@ -31,6 +32,11 @@ export interface Harness {
    * runtime exposes no such policy.
    */
   hostDepth(): number | undefined
+  /**
+   * The Agent Preset roster a definition's `agent_preset` is checked against.
+   * @returns the roster, or `undefined` when this composition mounts none.
+   */
+  presets(): AgentPresetRosterLike | undefined
   /**
    * Register a tool in one Agent's scope. Registration goes through the Agent's
    * own context, so every Agent gets its own scope while sharing this row.
@@ -72,6 +78,23 @@ function readDepthPolicy(subagents: SubagentService): (() => number | undefined)
 }
 
 /**
+ * Read the Agent Preset roster, when this composition mounts one.
+ *
+ * The preset service is optional: the packaged Web bundle mounts it and the
+ * headless bundle does not, so a definition that sets `agent_preset` is
+ * unavailable without it. Reading it here keeps that a reported degradation
+ * rather than a surprise at the first delegation.
+ * @param ctx - the plugin context.
+ * @returns the roster, or `undefined` on a context without one.
+ */
+function readPresetRoster(ctx: ContextLike): AgentPresetRosterLike | undefined {
+  const roster = ctx.get('agentPresets')
+  if (typeof roster !== 'object' || roster === null) return undefined
+  const candidate = roster as { list?: unknown }
+  return typeof candidate.list === 'function' ? roster as AgentPresetRosterLike : undefined
+}
+
+/**
  * Build the adapter for one plugin context.
  *
  * A missing capability is announced once, at load, together with what stops
@@ -83,6 +106,7 @@ function readDepthPolicy(subagents: SubagentService): (() => number | undefined)
 export function createHarness(ctx: ContextLike, logger: LoggerLike): Harness {
   const registry = readAgentRegistry(ctx)
   const depth = readDepthPolicy(ctx.subagents)
+  const presets = readPresetRoster(ctx)
 
   if (registry === undefined) {
     logger.info(
@@ -94,6 +118,12 @@ export function createHarness(ctx: ContextLike, logger: LoggerLike): Harness {
     logger.warn(
       'dsh-agents-toml: this runtime exposes no shared delegation-depth policy; a definition that omits '
       + '`max_depth` runs without a depth cap, and a definition that sets one is unavailable',
+    )
+  }
+  if (presets === undefined) {
+    logger.info(
+      'dsh-agents-toml: this composition mounts no `agent-presets` service; a definition that sets '
+      + '`agent_preset` is unavailable (the packaged web bundle mounts it, the headless bundle does not)',
     )
   }
 
@@ -110,6 +140,7 @@ export function createHarness(ctx: ContextLike, logger: LoggerLike): Harness {
   return {
     agents: () => registry?.list() ?? [],
     hostDepth: () => depth?.(),
+    presets: () => presets,
     registerToolIn: (agent, build) => agent.ctx.inject([...DELEGATION_SERVICES], scoped => { build(scoped) }),
     registerSkillProvider,
   }

@@ -111,8 +111,10 @@ export async function runGuiScenarios(options) {
       log(`  flipping off: ${JSON.stringify(await setSwitch(cdp, TRUST_SWITCH, false))}`)
       await saveCard(cdp)
     }
+    // The switch defaults to off without writing anything, so `undefined` (the key
+    // is absent from the patch) is the same state as `false`; only `true` is wrong.
     c1.check('the profile patch holds trust off',
-      readTrust() === 'false', `patch trustProjectAgents=${readTrust()}`)
+      readTrust() !== 'true', `patch trustProjectAgents=${readTrust()}`)
 
     await newSession(cdp)
     const first = await sendMessage(cdp, '只回复两个字：收到C1', 32000)
@@ -203,19 +205,22 @@ export async function runGuiScenarios(options) {
       // on `next-step` when it is still mid-turn, so both targets carry it.
       const noticeText = event => (event.data?.inserted ?? []).flatMap(part => part?.content ?? [])
         .map(part => part?.text ?? '').join('\n')
-      const noticeOf = events => events
+      const noticesOf = events => events
         .filter(event => event.type === 'agent/inbox/spliced'
-          && (event.data?.target === 'next-turn' || event.data?.target === 'next-step'))
+          && (event.data?.target === 'next-turn' || event.data?.target === 'next-step')
+          && (event.data?.inserted?.length ?? 0) > 0)
+      const noticeOf = events => noticesOf(events)
         .map(noticeText)
         .find(text => text.includes('Its closing message:'))
       // The notice lands whenever the child settles, so poll both logs until the
       // notice appears and the child has a closing message to compare it with.
+      // Non-empty is the whole requirement: how verbose the child is belongs to the
+      // preset's persona, not to this scenario.
       const notice = await waitFor(() => {
         const found = noticeOf(readSession(parent.dir))
-        return found !== undefined && closingNow().length > 40 ? found : undefined
+        return found !== undefined && closingNow().length > 0 ? found : undefined
       }, 240000)
       const closing = closingNow()
-      const turns = readSession(parent.dir).filter(event => event.type === 'turn/start').length
 
       c3.check('the delegation is recorded as a continuable child',
         catalog.at(-1)?.data?.mode === 'continuable' && typeof childId === 'string',
@@ -224,11 +229,32 @@ export async function runGuiScenarios(options) {
         notice !== undefined && notice.includes(String(childId)),
         notice === undefined ? 'no notice spliced into the parent inbox' : `notice mentions ${childId}`)
       c3.check('the notice carries the child\'s closing text verbatim',
-        notice !== undefined && closing.length > 40
+        notice !== undefined && closing.length > 0
         && (notice.split('Its closing message:\n')[1] ?? '').trim() === closing.trim(),
         `closing message ${closing.length} chars`)
-      c3.check('the notice woke the idle parent for another turn',
-        turns >= 2, `${turns} turn/start events in the parent log`)
+
+      // Which of the two inbox targets carries the notice is decided by the parent's
+      // own state at that instant — `next-turn` when it is idle, `next-step` when it
+      // is still mid-turn — so the scenario asserts the shape each state calls for
+      // rather than a fixed turn count. An idle parent must be woken (a new turn
+      // starts after the splice); a running parent must have the notice consumed
+      // inside the turn that was already open.
+      const latest = readSession(parent.dir)
+      const noticeEvent = noticesOf(latest)
+        .filter(event => noticeText(event).includes('Its closing message:')).at(-1)
+      const splicedAfter = latest.filter(event => event.type === 'turn/start'
+        && event.seq > (noticeEvent?.seq ?? 0)).length
+      const consumed = latest.some(event => event.type === 'agent/inbox/spliced'
+        && event.data?.target === noticeEvent?.data?.target
+        && (event.data?.removedCount ?? 0) > 0
+        && event.seq > (noticeEvent?.seq ?? 0))
+      c3.check(`the notice is delivered the way the parent's state calls for (${String(noticeEvent?.data?.target)})`,
+        noticeEvent?.data?.target === 'next-turn'
+          ? splicedAfter >= 1
+          : noticeEvent?.data?.target === 'next-step' && consumed,
+        noticeEvent?.data?.target === 'next-turn'
+          ? `parent was idle, ${splicedAfter} turn(s) started after the splice`
+          : `parent was mid-turn, notice consumed in-turn=${consumed}`)
     }
     scenarios.push(c3.settled())
   } finally {

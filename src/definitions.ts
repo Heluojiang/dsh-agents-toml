@@ -9,8 +9,6 @@
  */
 import { parse as parseToml } from 'smol-toml'
 
-import type { ToolRestriction } from './host.ts'
-
 /** Where a definition file was found. */
 export type DefinitionOrigin = 'user' | 'project'
 
@@ -33,13 +31,16 @@ export interface AgentDefinition {
   readonly model?: string
   readonly reasoningEffort?: string
   readonly maxTokens?: number
-  /** Per-child persona, shadowing the deployment persona for this child. */
-  readonly persona?: string
+  /**
+   * Agent Preset this child is composed from. The preset owns the child's
+   * persona and tool set, so it replaces the per-child `persona` and `[tools]`
+   * fields that the Harness removed in 0.2.1.
+   */
+  readonly agentPreset?: string
   /** Absolute delegation-depth cap for the child this definition creates. */
   readonly maxDepth?: number
   /** Object-rooted JSON Schema returned as the child's structured result. */
   readonly outputSchema?: Record<string, unknown>
-  readonly tools?: ToolRestriction
   /** Absolute path of the definition file. */
   readonly file: string
   readonly origin: DefinitionOrigin
@@ -84,16 +85,41 @@ export const CANONICAL_KEYS = [
   'model',
   'reasoning_effort',
   'max_tokens',
-  'persona',
+  'agent_preset',
   'max_depth',
   'output_schema',
-  'tools',
 ] as const
 
 /** One accepted key, spelled the way TOML spells it. */
 export type CanonicalKey = typeof CANONICAL_KEYS[number]
 
 const KNOWN_KEYS: ReadonlySet<string> = new Set<string>(CANONICAL_KEYS)
+
+/**
+ * Keys this format used to accept, with the reason they are gone and what to
+ * write instead.
+ *
+ * The Harness removed per-child `persona` and `toolFilter` from its start
+ * request in 0.2.1, so 0.4.0 removed the two TOML fields that fed them. A file
+ * still carrying one is a rejected file either way; naming the migration is the
+ * difference between an operator who knows what to do and one who sees a
+ * working file turn into `unknown key`.
+ */
+const REMOVED_KEYS: ReadonlyMap<string, string> = new Map([
+  [
+    'persona',
+    'persona was removed in 0.4.0: the Harness dropped per-child persona in 0.2.1, so a child\'s persona now '
+    + 'comes from an Agent Preset — write agent_preset = "<preset id>" instead, and declare the persona there '
+    + '(see guide/migrating-to-0.4.md)',
+  ],
+  [
+    'tools',
+    'tools was removed in 0.4.0: the Harness dropped per-child tool filtering in 0.2.1 and offers no '
+    + 'replacement field, so a per-name allow/deny list cannot be expressed — use an Agent Preset that mounts '
+    + 'exactly the tool plugins the child may use, and select it with agent_preset '
+    + '(see guide/migrating-to-0.4.md)',
+  ],
+])
 
 function isCanonicalKey(key: string): key is CanonicalKey {
   return KNOWN_KEYS.has(key)
@@ -156,40 +182,6 @@ function readDepth(value: unknown, field: string, problems: string[]): number | 
   return value
 }
 
-function readStringArray(value: unknown, field: string, problems: string[]): readonly string[] | undefined {
-  if (value === undefined) return undefined
-  if (!Array.isArray(value)) {
-    problems.push(`${field} must be an array of non-empty tool names`)
-    return undefined
-  }
-  const entries: string[] = []
-  for (const entry of value) {
-    if (typeof entry !== 'string' || entry.length === 0) {
-      problems.push(`${field} must be an array of non-empty tool names`)
-      return undefined
-    }
-    entries.push(entry)
-  }
-  return entries
-}
-
-function readToolRestriction(value: unknown, problems: string[]): ToolRestriction | undefined {
-  if (value === undefined) return undefined
-  if (!isRecord(value)) {
-    problems.push('tools must be a table with optional allow and deny arrays')
-    return undefined
-  }
-  const unknown = Object.keys(value).filter(key => key !== 'allow' && key !== 'deny')
-  if (unknown.length > 0) problems.push(`tools has unknown key(s): ${unknown.join(', ')}`)
-  const allow = readStringArray(value['allow'], 'tools.allow', problems)
-  const deny = readStringArray(value['deny'], 'tools.deny', problems)
-  if (allow === undefined && deny === undefined) return undefined
-  return {
-    ...allow === undefined ? {} : { allow },
-    ...deny === undefined ? {} : { deny },
-  }
-}
-
 /**
  * Parse and validate one TOML definition file.
  * @param text - raw file content.
@@ -212,12 +204,22 @@ export function parseDefinition(text: string, source: DefinitionSource): ParseOu
 
   const normalized = new Map<CanonicalKey, unknown>()
   const unknown: string[] = []
+  const removed: string[] = []
   for (const [key, value] of Object.entries(parsed)) {
     // Hyphens and underscores name the same key, so both spellings normalize
     // before the accepted-key check.
     const canonical = key.replaceAll('-', '_')
     if (isCanonicalKey(canonical)) normalized.set(canonical, value)
-    else unknown.push(key)
+    else {
+      const migration = REMOVED_KEYS.get(canonical)
+      if (migration === undefined) unknown.push(key)
+      else removed.push(migration)
+    }
+  }
+  // A field this format dropped gets the migration text instead of the generic
+  // "unknown key", so an upgrade reads as a migration rather than as a typo.
+  if (removed.length > 0) {
+    return fail([...removed, ...unknown.length === 0 ? [] : [`unknown key(s): ${unknown.join(', ')}`]].join('; '))
   }
   if (unknown.length > 0) return fail(`unknown key(s): ${unknown.join(', ')}`)
 
@@ -243,9 +245,8 @@ export function parseDefinition(text: string, source: DefinitionSource): ParseOu
   const model = readString(normalized.get('model'), 'model', problems)
   const reasoningEffort = readString(normalized.get('reasoning_effort'), 'reasoning_effort', problems)
   const maxTokens = readPositiveInteger(normalized.get('max_tokens'), 'max_tokens', problems)
-  const persona = readString(normalized.get('persona'), 'persona', problems)
+  const agentPreset = readString(normalized.get('agent_preset'), 'agent_preset', problems)
   const maxDepth = readDepth(normalized.get('max_depth'), 'max_depth', problems)
-  const tools = readToolRestriction(normalized.get('tools'), problems)
 
   const outputSchema = normalized.get('output_schema')
   if (outputSchema !== undefined && !isRecord(outputSchema)) {
@@ -266,10 +267,9 @@ export function parseDefinition(text: string, source: DefinitionSource): ParseOu
       ...model === undefined ? {} : { model },
       ...reasoningEffort === undefined ? {} : { reasoningEffort },
       ...maxTokens === undefined ? {} : { maxTokens },
-      ...persona === undefined ? {} : { persona },
+      ...agentPreset === undefined ? {} : { agentPreset },
       ...maxDepth === undefined ? {} : { maxDepth },
       ...isRecord(outputSchema) ? { outputSchema } : {},
-      ...tools === undefined ? {} : { tools },
       file: source.file,
       origin: source.origin,
     },

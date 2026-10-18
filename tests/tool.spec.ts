@@ -4,9 +4,17 @@ import { describe, it } from 'node:test'
 
 import type { AgentDefinition, DefinitionFailure } from '../src/definitions.ts'
 import type { DiscoveryResult } from '../src/discovery.ts'
-import type { AgentLike, SubagentResult, SubagentStartRequest, ToolDefinition } from '../src/host.ts'
+import type { AgentLike, SubagentResult, ToolDefinition } from '../src/host.ts'
 import { buildDelegationTool } from '../src/tool.ts'
-import { createAgent, createFakeContext, createFakeSubagents, FULL_CAPABILITIES, NO_CAPABILITIES } from './harness.ts'
+import {
+  createAgent,
+  createFakeContext,
+  createFakePresets,
+  createFakeSubagents,
+  FORK_CAPABILITIES,
+  FULL_CAPABILITIES,
+  NO_CAPABILITIES,
+} from './harness.ts'
 
 function definition(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
   return {
@@ -27,7 +35,6 @@ function discovery(definitions: readonly AgentDefinition[], failures: readonly D
 interface Bench {
   readonly tool: ToolDefinition
   readonly started: ReturnType<typeof createFakeSubagents>['started']
-  readonly continuable: ReturnType<typeof createFakeSubagents>['continuable']
   readonly parent: AgentLike
   readonly exec: { agent: AgentLike; signal: AbortSignal }
 }
@@ -45,13 +52,18 @@ function bench(
     readonly inheriting?: readonly string[]
     /** Host depth the installed tool reads at call time; omit for the runtime default. */
     readonly hostDepth?: () => number | undefined
+    /** Presets the composition's roster reports; omit for a composition without one. */
+    readonly presets?: readonly string[]
   } = {},
 ): Bench {
   const fake = createFakeSubagents(
     options.providers ?? [{ name: 'spawn', capabilities: FULL_CAPABILITIES, continuable: true }],
     options.result === undefined ? {} : { result: options.result },
   )
-  const context = createFakeContext(fake.service)
+  const roster = options.presets === undefined
+    ? undefined
+    : createFakePresets(options.presets.map(id => ({ id })))
+  const context = createFakeContext(fake.service, roster === undefined ? {} : { presets: roster })
   const parent = createAgent(context.ctx, 'C:/work')
   const controller = new AbortController()
   if (options.abort === true) controller.abort()
@@ -60,17 +72,20 @@ function bench(
     defaultProvider: options.defaultProvider ?? 'spawn',
     reportFailuresToModel: true,
     subagents: fake.service,
+    presets: roster,
     hostDepth: options.hostDepth ?? (() => fake.hostDepth()),
     load: () => Promise.resolve(discovery(definitions, options.failures ?? [])),
     installed: definitions.filter(entry => entry.enabled).map(entry => ({
       name: entry.name,
       description: entry.description,
       continuable: entry.mode === 'continuable',
+      ...entry.agentPreset === undefined ? {} : { agentPreset: entry.agentPreset },
       inherits: (options.inheriting ?? []).includes(entry.name),
     })),
     installedFailures: options.failures ?? [],
+    installedPresets: options.presets,
   })
-  return { tool, started: fake.started, continuable: fake.continuable, parent, exec: { agent: parent, signal: controller.signal } }
+  return { tool, started: fake.started, parent, exec: { agent: parent, signal: controller.signal } }
 }
 
 const ARGS = { agent_type: 'reviewer', description: 'review diff', prompt: 'review the diff' }
@@ -151,35 +166,38 @@ describe('argument validation', () => {
 })
 
 describe('delegation', () => {
-  it('runs a one-shot child and disposes the run', async () => {
+  it('runs a one-shot child as a caller-delivered activation and disposes it', async () => {
     const { tool, started, exec, parent } = bench([definition()])
     const value = await tool.execute(ARGS, exec)
     assert.deepEqual(value, { text: 'done' })
     assert.equal(started.length, 1)
-    assert.equal(started[0]?.name, 'spawn')
+    assert.equal(started[0]?.spec.provider, 'spawn')
+    assert.equal(started[0]?.spec.label, 'review diff')
+    assert.equal(started[0]?.spec.delivery, 'caller')
     assert.equal(started[0]?.disposed, true)
-    const request = started[0]?.request as SubagentStartRequest | undefined
-    assert.equal(request?.label, 'review diff')
-    assert.deepEqual(request.prompt, [{ type: 'text', text: 'review the diff' }])
-    assert.equal(request.parent, parent)
-    assert.equal(request.maxDepth, 1)
+    const request = started[0]?.spec.request
+    assert.deepEqual(request?.prompt, [{ type: 'text', text: 'review the diff' }])
+    assert.equal(request?.parent, parent)
+    assert.equal(request?.maxDepth, 1)
   })
 
   it('prefers the definition depth cap over the host setting', async () => {
-    const { tool, started, exec } = bench([definition({ maxDepth: 0 })])
+    const { tool, started, exec } = bench([definition({ maxDepth: 2 })])
     await tool.execute(ARGS, exec)
-    assert.equal(started[0]?.request.maxDepth, 0)
+    assert.equal(started[0]?.spec.request.maxDepth, 2)
   })
 
-  it('starts a continuable child and returns its id', async () => {
-    const { tool, started, continuable, exec } = bench([definition({ mode: 'continuable' })])
+  it('starts a continuable child as a parent-delivered activation and leaves it running', async () => {
+    const { tool, started, exec } = bench([definition({ mode: 'continuable' })])
     const value = await tool.execute(ARGS, exec)
     assert.deepEqual(value, { text: 'started subagent child-1' })
-    assert.equal(started.length, 0)
-    assert.equal(continuable.length, 1)
-    assert.equal(continuable[0]?.provider, 'spawn')
-    assert.equal(continuable[0]?.label, 'review diff')
-    assert.equal('signal' in (continuable[0]?.request ?? {}), false)
+    assert.equal(started.length, 1)
+    assert.equal(started[0]?.spec.provider, 'spawn')
+    assert.equal(started[0]?.spec.label, 'review diff')
+    // A background child must outlive this call, so its activation is not disposed.
+    assert.equal(started[0]?.spec.delivery, 'parent')
+    assert.equal(started[0]?.disposed, false)
+    assert.equal('outputSchema' in (started[0]?.spec.request ?? {}), false)
   })
 
   it('reports a non-completed run as a tool error', async () => {
@@ -199,12 +217,12 @@ describe('delegation', () => {
 
   it('explains why a failed definition is unavailable', async () => {
     const failures: DefinitionFailure[] = [
-      { file: 'C:/defs/writer.toml', origin: 'project', name: 'writer', reason: 'persona is unsupported by this provider' },
+      { file: 'C:/defs/writer.toml', origin: 'project', name: 'writer', reason: 'unknown key(s): persona' },
     ]
     const { tool, exec } = bench([definition()], { failures })
     await assert.rejects(
       () => tool.execute({ ...ARGS, agent_type: 'writer' }, exec),
-      /subagent "writer" is unavailable: persona is unsupported by this provider \(C:\/defs\/writer\.toml\)/,
+      /subagent "writer" is unavailable: unknown key\(s\): persona \(C:\/defs\/writer\.toml\)/,
     )
   })
 
@@ -231,6 +249,39 @@ describe('delegation', () => {
     )
   })
 
+  it('refuses an independent preset on a transport that inherits the parent context', async () => {
+    const { tool, exec } = bench(
+      [definition({ provider: 'fork', agentPreset: 'reviewer' })],
+      { providers: [{ name: 'fork', capabilities: FORK_CAPABILITIES, inheritsParentContext: true }], presets: ['reviewer'] },
+    )
+    await assert.rejects(
+      () => tool.execute(ARGS, exec),
+      /cannot run on provider "fork": independent agent preset selection is unsupported by this provider/,
+    )
+  })
+
+  it('passes the definition preset into the activation request', async () => {
+    const { tool, started, exec } = bench([definition({ agentPreset: 'reviewer' })], { presets: ['reviewer'] })
+    await tool.execute(ARGS, exec)
+    assert.equal(started[0]?.spec.request.agentPreset, 'reviewer')
+  })
+
+  it('refuses a preset this composition does not mount the roster for', async () => {
+    const { tool, exec } = bench([definition({ agentPreset: 'reviewer' })])
+    await assert.rejects(
+      () => tool.execute(ARGS, exec),
+      /sets agent_preset = "reviewer", but this composition mounts no agent-presets service/,
+    )
+  })
+
+  it('lists the available presets when the named one is not registered', async () => {
+    const { tool, exec } = bench([definition({ agentPreset: 'reviever' })], { presets: ['reviewer', 'minimal'] })
+    await assert.rejects(
+      () => tool.execute(ARGS, exec),
+      /names agent preset "reviever", which is not registered; available agent presets: reviewer, minimal/,
+    )
+  })
+
   it('runs an out-of-process definition that asks for no capability, sending no depth cap', async () => {
     // The Harness rejects any request carrying `maxDepth` on a provider without
     // `depthLimit`, so a plain definition must not carry the Host's default.
@@ -240,7 +291,7 @@ describe('delegation', () => {
     const value = await tool.execute(ARGS, exec)
     assert.deepEqual(value, { text: 'done' })
     assert.equal(started.length, 1)
-    assert.equal(started[0]?.request.maxDepth, undefined)
+    assert.equal(started[0]?.spec.request.maxDepth, undefined)
   })
 
   it('returns a captured structured result as JSON text', async () => {

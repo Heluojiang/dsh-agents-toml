@@ -42,10 +42,9 @@ export interface ToolDefinition {
 /** Start-time features a subagent provider advertises. */
 export interface SubagentCapabilities {
   readonly agentOptions: boolean
+  readonly agentPreset: boolean
   readonly outputSchema: boolean
   readonly depthLimit: boolean
-  readonly toolFilter: boolean
-  readonly persona: boolean
 }
 
 /** Host-Agent route overrides for a child. */
@@ -56,12 +55,6 @@ export interface AgentOptions {
   readonly maxTokens?: number
 }
 
-/** Child tool scoping; unknown names are rejected by the service. */
-export interface ToolRestriction {
-  readonly allow?: readonly string[]
-  readonly deny?: readonly string[]
-}
-
 /** One registered child-agent transport. */
 export interface SubagentProvider {
   readonly name: string
@@ -70,20 +63,32 @@ export interface SubagentProvider {
   prepareContinuable?(request: unknown): Promise<unknown>
 }
 
-/** One-shot delegation request. */
+/** Everything a child is started with, minus the label and cancellation the spec owns. */
 export interface SubagentStartRequest {
-  readonly label?: string
   readonly prompt: readonly ContentBlock[]
   readonly parent: AgentLike
-  readonly signal: AbortSignal
   readonly agentOptions?: AgentOptions
+  readonly agentPreset?: string
   readonly outputSchema?: Record<string, unknown>
   readonly maxDepth?: number
-  readonly toolFilter?: ToolRestriction
-  readonly persona?: string
 }
 
-/** Terminal outcome of a one-shot run. */
+/** One activation's start spec. `delivery` decides whether the caller awaits the result. */
+export interface SubagentActivationSpec {
+  readonly provider: string
+  readonly label: string
+  readonly childId?: unknown
+  readonly request: SubagentStartRequest
+  readonly signal: AbortSignal
+  /**
+   * `caller` resolves this activation's result to the caller only; `parent`
+   * additionally delivers a settlement notice to the parent Agent, which
+   * requires session persistence.
+   */
+  readonly delivery: 'parent' | 'caller'
+}
+
+/** Terminal outcome of a child run. */
 export interface SubagentResult {
   readonly output: readonly ContentBlock[]
   readonly structured?: unknown
@@ -91,26 +96,33 @@ export interface SubagentResult {
   readonly stopReason: string
 }
 
-/** Published one-shot child handle. */
-export interface SubagentRun {
+/** A started child: its identity, its eventual result, and its teardown. */
+export interface SubagentActivation {
+  readonly childId: unknown
+  readonly messageId?: unknown
   readonly result: Promise<SubagentResult>
   dispose(): Promise<void>
 }
 
-/** Continuable-child creation request. */
-export interface ContinuableStartSpec {
-  readonly provider: string
-  readonly label: string
-  readonly request: Omit<SubagentStartRequest, 'label' | 'signal' | 'outputSchema'>
-  readonly signal: AbortSignal
+/** One declared Agent Preset as the roster reports it. */
+export interface AgentPresetSummaryLike {
+  readonly id: string
+  readonly name?: string
+  readonly description?: string
+  /** Set when this preset's composition could not be mounted. */
+  readonly broken?: string
 }
 
-/** `ctx.subagents`: named provider registry plus run and continuation entry points. */
+/** `ctx.agentPresets`: the roster an `agent_preset` value is checked against. */
+export interface AgentPresetRosterLike {
+  list(): Promise<readonly AgentPresetSummaryLike[]>
+}
+
+/** `ctx.subagents`: named provider registry plus the one activation entry point. */
 export interface SubagentService {
   getProvider(name: string): SubagentProvider | undefined
   list(): string[]
-  start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
-  startContinuable(spec: ContinuableStartSpec): Promise<{ readonly childId: unknown; readonly messageId: unknown }>
+  startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation>
   /** Absent on Harness releases that predate the shared depth policy. */
   resolveMaxDepth?(configured?: number | 'provider-managed'): number | undefined
 }

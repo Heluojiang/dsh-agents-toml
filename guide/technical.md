@@ -21,15 +21,14 @@
 | 定义热生效 | ✅ | 每次调用重新读取文件，改完下一次委派即生效 |
 | 目录监听 | ✅ | `watchDefinitions`（默认开）→ 文件增删改后重装工具，刷新 `agent_type` 枚举 |
 | 按 Agent 安装 | ✅ | 每个 Agent 装进自己的作用域（`agent.ctx`），不同项目看到不同定义集 |
-| 能力校验 | ✅ | 定义用了 provider 不支持的能力 → 该定义判失败并给出原因 |
+| 能力校验 | ✅ | 定义用了 provider 不支持的能力 → 该定义判失败（解析期）或委派时报错（调用期），原因明确 |
 | 失败隔离 | ✅ | 单文件失败不影响其他定义，**绝不影响 Agent 创建** |
 | 计划任务/结构化返回 | ✅ | `output_schema`（仅 `one-shot`）→ 子代理返回结构化结果 |
-| 可继续子代理 | ✅ | `mode = "continuable"` → `ctx.subagents.startContinuable()`，在入队被接受时返回 `{childId}`；收尾时续接管理器投递**带最终文本的结算通知**给父会话（无文本时说明 `It left no closing message.`），续聊靠官方 `send_message`（本插件不注册该工具） |
-| persona | ✅ | 只作用于该子代理，遮蔽部署 persona |
-| 工具过滤 | ✅ | `[tools] allow/deny`：从子代理提示词移除 **且** 拒绝执行 |
+| 可继续子代理 | ✅ | `mode = "continuable"` → `ctx.subagents.startActivation({ delivery: 'parent' })`，在入队被接受时返回 `started subagent <childId>`；收尾时续接管理器投递**带最终文本的结算通知**给父会话（无文本时说明 `It left no closing message.`），续聊靠官方 `send_message`（本插件不注册该工具） |
+| Agent Preset | ✅ | `agent_preset = "<id>"` → 子代理的人设与工具集由该 preset 决定（0.2.1 起官方用 preset 取代了逐子代理 persona 与工具过滤） |
 | 深度上限 | ✅ | `max_depth`（绝对值，最小 1） |
 | 子代理模型路由 | ✅ | `llm_provider` / `model` / `reasoning_effort` / `max_tokens` |
-| 只读子代理 | ⚠️ 近似 | 只能用 `[tools] deny` 限制工具；**权限预设/沙箱/审批不可按定义设置**（见第 11 节） |
+| 只读子代理 | ⚠️ 近似 | 只能用一个"只挂读工具"的 Agent Preset 近似；**权限预设/沙箱/审批不可按定义设置**，**逐名字的工具过滤自 0.2.1 起官方无等价项**（见第 11 节） |
 | 失败可视 | ✅ | 日志 warn + 工具描述列出不可用定义 + 调用时明确报错 |
 | 插件页配置 | ✅ | 挂在**本插件自己的插件页**上（插件 → 已安装 → dsh-agents-toml），改 4 个 volatile 字段，保存即生效（见 §3） |
 | 内置 Skill | ✅ | 包内 `assets/skill/SKILL.md` 经 `ctx.skills` 发布，模型在技能目录里看到 `dsh-agents-toml` 并据此代写定义（见 §17） |
@@ -90,22 +89,27 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 
 字段清单、类型、可选项、默认值与"所需能力"的对照表在 [README · TOML 字段参考](../README.md#toml-字段参考)；本节只讲**校验与解析**这一侧的实现。
 
-键名先做 `-` → `_` 归一化（`llm-provider` ≡ `llm_provider`），再与已知键集合比对；任何未列出的键都判失败。
+键名先做 `-` → `_` 归一化（`llm-provider` ≡ `llm_provider`），再与已知键集合比对。
+
+**0.4.0 移除的键**（`persona`、`tools`）走另一条分支：它们**不在**已知键集合里，但也不是"未知键"。解析器对它们给出**定向迁移文案**（说明官方在 0.2.1 删掉了对应的启动字段、该改成什么、并指向 `guide/migrating-to-0.4.md`），只有在移除键为空时才退回通用的 `unknown key(s): …`。两类可以同时出现，此时原因以 `;` 连接。这样一次升级读起来是"迁移"，不是"打错字"。
 
 ### 4.3 校验规则（全部 fail loud）
 
 | 规则 | 行为 |
 |---|---|
 | 未知键 | 定义失败，报出未知键名 |
+| 已移除的键（`persona` / `tools`） | 定义失败，报出**迁移做法**（替代字段与文档链接） |
 | `name` 缺失/非法 | 失败；须匹配 `[a-z0-9][a-z0-9_-]{0,63}`（大小写不敏感） |
 | `description` 缺失/空 | 失败 |
 | `mode` 非 `one-shot`/`continuable` | 失败 |
+| `agent_preset` 非非空字符串 | 失败 |
 | `max_depth` 为 0 | **失败**：该上限约束被创建子代理的深度（≥1），0 会让委派本身被拒 |
 | `max_depth` 为负/非整数 | 失败 |
 | `max_tokens` 非正整数 | 失败 |
 | `output_schema` 不是 TOML 表 | 失败（须是对象根 JSON Schema） |
-| `[tools]` 出现非 allow/deny 键 | 失败 |
 | TOML 语法错误 | 失败，附解析错误信息 |
+
+`persona` 与 `agent_preset` 同时出现时**仍然判失败**：迁移动作是"删掉旧行"，而不是"两者共存"。
 
 解析层会把 TOML 的 null-prototype 对象归一化为普通对象（`output_schema` 会交给 Harness 做 lossless-JSON 校验）。
 
@@ -121,7 +125,7 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 | `description` | string | 3–5 词标签；同时作为子代理的 durable label |
 | `prompt` | string | 自包含任务说明（子代理默认在自己的上下文里工作；`fork` 这类继承父级已完成轮次的传输除外，工具描述会区分） |
 
-工具描述包含：用途说明 + 传输是否继承上下文的说明 + `Configured subagents: a, b.` + 可选的 continuable 提示与 `Unavailable definitions: name (原因).`。「是否继承上下文」由安装期读取 provider 的 `inheritsParentContext` 决定（provider 尚未注册时按不继承计），因此同一次安装里的两类传输不会被一句笼统的措辞覆盖。
+工具描述包含：用途说明 + 传输是否继承上下文的说明 + `Configured subagents: a, b.` + 可选的一行可用 Agent Preset 清单（仅当某个已安装定义写了 `agent_preset`）+ 可选的 continuable 提示与 `Unavailable definitions: name (原因).`。「是否继承上下文」由安装期读取 provider 的 `inheritsParentContext` 决定（provider 尚未注册时按不继承计），因此同一次安装里的两类传输不会被一句笼统的措辞覆盖。列出 preset 清单的理由与列出失败定义相同：id 写错是定义作者最容易犯的错，而模型是唯一能读到这份定义的"人"，把合法取值写给它，错误就能在委派前被说出来。
 
 定义自己的 `description`（TOML 的必填键）**写进 `agent_type` 参数的说明**，形如 `Each is declared for a different job: reviewer — 独立只读审查… | explorer — …`：JSON Schema 的枚举只携带名字，模型要"按用途选值"就必须看到这句话，否则这个必填键对模型毫无作用。
 
@@ -131,13 +135,27 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 2. **重新读取定义**（热生效）→ 按名查找启用的定义；找不到时给出可用名单，命中失败定义时给出原因。
 3. 选 provider（定义的 `provider` 或 `defaultProvider`）→ 未注册则列出已注册 provider。
 4. 能力位校验（见第 9 节）→ 不匹配则报明确原因。
-5. 解析深度策略（`depthFor`）：定义写了 `max_depth` 就原样下发；否则**仅当 provider 具备 `depthLimit`** 时才下发 Host 的 `subagent.maxDepth`，否则不下发并记一条 warn（原因见第 9 节末）。
-6. 检查取消信号 → 分派：
-   - `one-shot`：`ctx.subagents.start(provider, request)` → 等 `result` → **总是 dispose**；
-   - `continuable`：`ctx.subagents.startContinuable({provider, label, request, signal})` → 返回 `started subagent <childId>`。该 Promise 在**入队被接受**时就 resolve（不等待子代理开跑或落盘），措辞与官方 `subagent` 工具在 continuable 下逐字一致 —— **结论不在本次返回值里**。子代理结算时由 `dsh-subagent` 的续接管理器 `notifySettlement()` 向父会话投递一条 user 消息：开头是结局句（`Background subagent <id> finished and will do no further work unless you send it more.`，另有 stopped / ran out of room / declined / failed 四种），随后是子代理**最终 assistant 输出中的非空文本块**（无非空文本时写 `It left no closing message.`）；该投递是**无条件**的（只要调用方拿到过 id），父会话空闲会被唤醒，且**不受 Agent Teams 影响**。不回传的是中间过程（工具输出、推理、中途文本），那些靠 `send_message` 往返；续聊（steer / wake / 冷启动）属于官方 `dsh-tool-subagent-control`，本插件不重复实现。
-7. 结果映射（`describeResult`）：捕获到结构化值 → 返回该值的 JSON 文本（子代理同时留了文本时附在其后，中间空一行）；否则 `completed` → 返回最终文本（无文本时给占位句）；非 `completed` → 工具报错，内容是 `the subagent did not complete: <stopReason>` + 提供方诊断 + 部分输出。定义配了 `output_schema` 却没拿到值时，错误里补一句 `the child did not produce a value for output_schema`（Harness 会把这类"跑完但没交值"改写成 `stopReason: error`，不补这句会看起来像模型崩了）。
+5. `agent_preset` 存在性校验（见 §5.3）→ 组合没有 preset 服务、或 id 不存在，都在这里报明确原因。
+6. 解析深度策略（`depthFor`）：定义写了 `max_depth` 就原样下发；否则**仅当 provider 具备 `depthLimit`** 时才下发 Host 的 `subagent.maxDepth`，否则不下发并记一条 warn（原因见第 9 节末）。
+7. 检查取消信号 → 分派，两条路都走**同一个**入口 `ctx.subagents.startActivation(spec)`，只差 `delivery`：
+   - `one-shot` → `delivery: 'caller'`：结果只回给本次调用方，随后 `await activation.dispose()`（**总是 dispose**）；
+   - `continuable` → `delivery: 'parent'`：由续接管理器在结算时向父 Agent 投递结算通知（因此需要 session persistence），**不 dispose** —— 后台子代理必须活得比这次调用久；立即返回 `started subagent ${childId}`。该 Promise 在**入队被接受**时就 resolve（不等待子代理开跑或落盘），措辞与官方 `subagent` 工具在 continuable 下逐字一致 —— **结论不在本次返回值里**。子代理结算时由 `dsh-subagent` 的续接管理器 `notifySettlement()` 向父会话投递一条 user 消息：开头是结局句（`Background subagent <id> finished and will do no further work unless you send it more.`，另有 stopped / ran out of room / declined / failed 四种），随后是子代理**最终 assistant 输出中的非空文本块**（无非空文本时写 `It left no closing message.`）；该投递在 `delivery === 'parent'` 时发生，父会话空闲会被唤醒，且**不受 Agent Teams 影响**。不回传的是中间过程（工具输出、推理、中途文本），那些靠 `send_message` 往返；续聊（steer / wake / 冷启动）属于官方 `dsh-tool-subagent-control`，本插件不重复实现。
+8. 结果映射（`describeResult`）：捕获到结构化值 → 返回该值的 JSON 文本（子代理同时留了文本时附在其后，中间空一行）；否则 `completed` → 返回最终文本（无文本时给占位句）；非 `completed` → 工具报错，内容是 `the subagent did not complete: <stopReason>` + 提供方诊断 + 部分输出。定义配了 `output_schema` 却没拿到值时，错误里补一句 `the child did not produce a value for output_schema`（Harness 会把这类"跑完但没交值"改写成 `stopReason: error`，不补这句会看起来像模型崩了）。
 
 委派不修改父会话，因此声明为并发安全（`isConcurrencySafe: () => true`）。
+
+### 5.3 `agent_preset` 的运行时校验
+
+`agent_preset` 是**唯一**一个"合法性只能在运行期确定"的字段（provider 能力是运行期事实，preset 是否存在也是）；它有两种失败，措辞刻意不同：
+
+| 情形 | 报错 |
+|---|---|
+| 该组合没有挂载 `agent-presets` 服务（随发行版的 headless 组合就是如此） | `subagent "x" sets agent_preset = "y", but this composition mounts no agent-presets service; the packaged web bundle mounts it and the headless bundle does not` |
+| 服务在，但没有这个 id | `subagent "x" names agent preset "y", which is not registered; available agent presets: a, b` |
+
+前者是"这个组合不支持该功能"，后者是"你写错了或没声明" —— 修法完全不同，所以不合并成一句话。同一组合缺服务这件事还会在**加载期**记一条 `info`（`src/harness.ts` 的可选服务探测，见 §7），使降级在日志里也可见，而不只是等第一次委派。
+
+校验放在**调用期**而不是加载期的另一个理由：preset 由其它插件行注册，那些行可能在本行之后才激活；加载期判"不存在"会误伤。工具描述里的可用 preset 清单则来自安装期读到的那份名册，两者不矛盾——清单是给模型看的提示，判定以调用期为准。
 
 ## 6. 生命周期与安装模型
 
@@ -163,8 +181,10 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 | 日志 `warn` | `dsh-agents-toml: <file>: <原因>`（同一文件+原因只报一次） |
 | 日志 `info` | 安装成功：`installed N subagent definition(s) for <cwd> as "<tool>"` |
 | 日志 `info` | 信任关闭时提示：`ignoring project definitions in <dir>; set trustProjectAgents: true ...` |
-| 工具描述 | `Unavailable definitions: <name> (<原因>)`，`reportFailuresToModel: false` 可关 |
-| 调用报错 | 未知名 → 列可用名单；失败定义 → 给原因与文件；provider 缺失 → 列已注册名 |
+| 日志 `info` | 组合没有 `agent-presets` 服务时（加载期一次）：说明写了 `agent_preset` 的定义会不可用，并指出 web 组合有、headless 没有 |
+| 日志 `warn` | 组合没有共享深度策略时（加载期一次）：说明不写 `max_depth` 就没有深度上限、写了则不可用 |
+| 工具描述 | `Unavailable definitions: <name> (<原因>)`，`reportFailuresToModel: false` 可关；另有可选的一行可用 Agent Preset 清单 |
+| 调用报错 | 未知名 → 列可用名单；失败定义 → 给原因与文件；provider 缺失 → 列已注册名；`agent_preset` 不可用 → 区分"没有 preset 服务"与"id 未注册"，后者列出可用 id |
 
 ## 8. 热更新与生效时机
 
@@ -183,12 +203,13 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 | 顺序 | 规则 id | 触发条件 | 报错原文 |
 |---|---|---|---|
 | 1 | `agentOptions` | 定义了 `llm_provider`/`model`/`reasoning_effort`/`max_tokens` 任一，但 provider 无 `agentOptions` | `child LLM routing is unsupported by this provider` |
-| 2 | `persona` | 定义了 `persona`，但无 `persona` | `persona is unsupported by this provider` |
-| 3 | `toolFilter` | 定义了 `tools`，但无 `toolFilter` | `tool filtering is unsupported by this provider` |
-| 4 | `depthLimit` | 定义了 `max_depth`，但无 `depthLimit` | `an explicit depth cap is unsupported by this provider` |
-| 5 | `outputSchema` | 定义了 `output_schema`，但无 `outputSchema` | `a structured output schema is unsupported by this provider` |
-| 6 | `outputSchemaOneShot` | 同时有 `output_schema` 与 `mode = "continuable"` | `a structured output schema applies to one-shot runs only` |
-| 7 | `continuable` | `mode = "continuable"` 且 provider 未实现 `prepareContinuable` | `continuable mode is unsupported by this provider` |
+| 2 | `agentPreset` | 定义了 `agent_preset`，但 provider **无** `agentPreset` **或** 它继承父上下文 | `independent agent preset selection is unsupported by this provider` |
+| 3 | `depthLimit` | 定义了 `max_depth`，但无 `depthLimit` | `an explicit depth cap is unsupported by this provider` |
+| 4 | `outputSchema` | 定义了 `output_schema`，但无 `outputSchema` | `a structured output schema is unsupported by this provider` |
+| 5 | `outputSchemaOneShot` | 同时有 `output_schema` 与 `mode = "continuable"` | `a structured output schema applies to one-shot runs only` |
+| 6 | `continuable` | `mode = "continuable"` 且 provider 未实现 `prepareContinuable` | `continuable mode is unsupported by this provider` |
+
+第 2 条的判定与 Harness 的 `assertCapabilities` **同构**：`agentPreset` 能力位与"不继承父上下文"是**同时**要求（`fork` 声明了其它能力位但继承父上下文，因此必然被拒）。提前在插件侧判，是为了把服务端那句断言换成本插件统一的报错形状，而不是让它在 `startActivation` 里抛出。
 
 这些检查在**调用期**执行（provider 的注册情况是运行时事实，安装期无法判定），报错统一包成：
 
@@ -196,9 +217,9 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 subagent "x" cannot run on provider "codex": child LLM routing is unsupported by this provider
 ```
 
-`acp` / `codex` / `claude-code` 声明 `NO_START_CAPABILITIES`（五项能力全无），因此在它们身上使用上述任一字段都会让该定义在调用时不可用；`dsh-sdk` 只有 `agentOptions`。
+`acp` / `codex` / `claude-code` 声明 `NO_START_CAPABILITIES`（四项能力全无），因此在它们身上使用上述任一字段都会让该定义在调用时不可用；`dsh-sdk` 只有 `agentOptions`。
 
-**隐含深度上限为什么不能无条件下发**：Harness 的服务端在 `start()` 里断言「请求带 `maxDepth` → provider 必须有 `depthLimit`」，而官方工具在挂载期就以 `maxDepth: 'provider-managed'` 明确放弃下发。本插件照同一取舍处理：`max_depth` 是定义作者显式要求的上限（provider 不支持就是该定义的失败）；**没写时不下发隐式上限**给不支持该能力的 provider，否则 `acp`/`codex` 上哪怕一个能力字段都没写也会在调用期整体失败。想让这类 provider 一定有深度上限，就在定义里写 `max_depth`（那时它会明确报"不支持"）。
+**隐含深度上限为什么不能无条件下发**：Harness 的服务端在启动时断言「请求带 `maxDepth` → provider 必须有 `depthLimit`」，而官方工具在挂载期就以 `maxDepth: 'provider-managed'` 明确放弃下发。本插件照同一取舍处理：`max_depth` 是定义作者显式要求的上限（provider 不支持就是该定义的失败）；**没写时不下发隐式上限**给不支持该能力的 provider，否则 `acp`/`codex` 上哪怕一个能力字段都没写也会在调用期整体失败。想让这类 provider 一定有深度上限，就在定义里写 `max_depth`（那时它会明确报"不支持"）。
 
 ## 10. 真机验证结论
 
@@ -208,34 +229,58 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 |---|---|---|
 | 组合与加载 | `--dump-config`、`--dump-config-schema` | ✅ 出现插件层/行与 Config schema |
 | headless | 离线 Messages 协议 stub（脚本化 tool_use） | ✅ 完整委派链路，父子会话各持久化 |
-| headless | **真实模型** | ✅ 36s；项目级定义；persona 命中；工具过滤 25 → 23（`write`/`edit` 消失） |
-| **web GUI** | **真实模型 + CDP 驱动真实点击** | ✅ 模型调用 `subagent_custom`（`agent_type=gui-reviewer`）；子会话 persona 命中、`write/edit=false`；`subagent/catalog` 记录子代理；父子两会话持久化 |
+| headless | **真实模型** | ✅ 36s；项目级定义；persona 命中；工具过滤 25 → 23（`write`/`edit` 消失）。**该结论在 `dsh-v0.2.0-rc.2` 上测得**：0.2.1 删掉了逐子代理 persona 与工具过滤，0.4.0 起这两项不再可复现，等价做法见 §10.1 |
+| **web GUI** | **真实模型 + CDP 驱动真实点击** | ✅ 模型调用 `subagent_custom`（`agent_type=gui-reviewer`）；子会话 persona 命中、`write/edit=false`；`subagent/catalog` 记录子代理；父子两会话持久化。**该结论同样在 `dsh-v0.2.0-rc.2` 上测得**（见 §10.1） |
 | **0.3.2 复验：Loader 语义** | 真实 `cordis-plugin-loader`（`scripts/e2e-loader.mjs`） | ✅ 9/9：项目定义即时安装；volatile 写入重装而不重挂（`fiber.state=2`，同一 fiber）；关信任释放工具；重开从空态装回；重名双向剔除且原因进工具描述；关监听后文件不再触发重装，重开后立即拾取 |
 | **0.3.2 复验：设置写入是否到达"已打开的会话"** | GUI + 会话日志（C1） | ✅ 同一会话两次请求对比：写入前 `agent_type` 枚举不存在（=插件未安装该工具），在**已打开**的会话里保存开关后，下一次请求的枚举即为 5 个项目定义，无需重启、无需重开会话 |
 | **0.3.2 复验：定义文件的目录监听** | GUI + 会话日志（C4） | ✅ 会话运行期间新建 toml → 同会话下一次请求的枚举多出该名字；删除后下一次请求又消失（200ms 去抖足够） |
 | **0.3.2 复验：`continuable` 结算通知** | GUI + 会话日志（C3） | ✅ 父会话收到 `agent/inbox/spliced`：`Background subagent <id> finished …` + `Its closing message:`，第二段与子代理最后一条 assistant 消息**逐字相同**；投递目标视父会话当时是否在跑而定（空闲时为 `next-turn`，进行中为 `next-step`，两者都携带通知）；空闲父会话被唤醒继续跑（`turn/start` 1 → 2） |
 | **0.3.4 复验：中途 `send_message` 与结算通知是两种形态** | GUI 真实模型（2 个 continuable 定义 × 各 1 轮） | ✅ 中途消息到达父会话时形态为 `Agent <childId> sent a message:` + 正文（**不是**结算通知）；发送方同步收到投递确认 `message delivered to agent <父会话id>`，4 次投递 4 次 delivered。收尾仍为 `Background subagent <id> finished …` + `Its closing message:`。persona 写明"中途只发增量"后，两个角色的中途消息都只剩一条增量、完整结论落在收尾（此前两者都会把整份结论中途也发一遍）。注意：该场景验证的是**父会话在线**时的投递形态；"父会话先结束就收不到"这条限制见 §11，依据为源码与官方限制条目，**未做 headless 真机复现** |
-| **0.3.2 复验：`[tools] deny` 与 persona 注入** | 真实模型 headless（`scripts/e2e-headless.mjs`） | ✅ 25 个全局工具、`agent_type` 枚举与项目定义逐字一致、枚举说明含每条 `description`；`explorer` 的 `deny = ["write","edit"]` 后子代理侧 23 个工具、`write`/`edit` 消失；AGENTS.md 注入子会话 |
+| **0.3.2 复验：`[tools] deny` 与 persona 注入** | 真实模型 headless（`scripts/e2e-headless.mjs`） | ✅ 25 个全局工具、`agent_type` 枚举与项目定义逐字一致、枚举说明含每条 `description`；`explorer` 的 `deny = ["write","edit"]` 后子代理侧 23 个工具、`write`/`edit` 消失；AGENTS.md 注入子会话。**`dsh-v0.2.0-rc.2` 上的历史结论**，见 §10.1 |
 | **GitHub 安装路径** | 本地 git 克隆模拟 + **真实仓库 `github:Heluojiang/dsh-agents-toml`** | ✅ 干净检出无 `lib/`；pnpm 先拦截 `prepare`，按 pnpm 打印的完整 key（codeload tarball URL + SHA）放行后重跑成功；安装副本由 `prepare` 构建出 `lib/`，且该构建产物能被 Harness 装载（Config schema 被采集、行进入组合） |
+| **0.4.0 复验：Loader 语义** | 真实 `cordis-plugin-loader`（`scripts/e2e-loader.mjs`），Harness `0.2.1-rc.2` | ✅ 9/9，与 0.3.2 的结论逐条一致（即时安装、volatile 写入不重挂、关/开信任、重名双向剔除、`watchDefinitions` 两个方向） |
+| **0.4.0 复验：委派链路（模型桩）** | `scripts/e2e.mjs` 委派档 + `scripts/e2e-model-stub.mjs`，真 Harness `0.2.1-rc.2` + 真 Agent Preset 注册表 | ✅ 26 个全局工具；`agent_type` 枚举与项目定义逐字一致；`subagent/catalog` 记下 `mode` 与 `childId`；**子会话 `agent-preset/selected` 在 seq 1，首条 `subagent/descriptor` 在 seq 2**（独立选择的判定规则成立）；preset 的 persona 标记出现在子代理 `system/message`；AGENTS.md 以 `agent-instructions` **user/message** 注入子会话。跑前跑后逐个 SHA-256 与 `git status` 均未变 |
+| **0.4.0 复验：版本约束在安装期生效** | 全局 `dsh 0.2.0-rc.2` + 一次性 home，`dsh plugin add` 本仓库 | ✅ 安装被拒：`Plugin @heluojiang/dsh-agents-toml@0.4.0 is incompatible with dsh 0.2.0-rc.2: peerDependencies {"@deepseek-ai/dsh":">=0.2.1-rc.2"}`，并给出 `dsh plugin allow-version … --accept-risk` 的显式放行路径；放行命令本身可用（本次未放行安装） |
+| **0.4.0 复验：浏览器档（真 Web 实例 + CDP）** | 一次性 home（`plugin-gui`）+ 真 Web 实例 + 独立调试端口浏览器 + 模型桩 | ✅ C1 卡内开关写入 `cordis.patch.yml` 后，**已打开**的会话下一次请求的枚举由 `null` 变为 `["explorer","reviewer"]`；C4 会话运行期间新建 `.toml` 当场进入枚举、删除后当场消失；C3 `continuable` 子代理的收尾文本作为 `agent/inbox/spliced` 回投父会话，本次父会话仍在跑，故目标为 `next-step` 且在该轮内被消费（`next-turn` 一侧的"叫醒空闲父会话"由更早的 0.3.2 复验与源码共同支撑） |
 
-验证期间发现并修复的三个缺陷（均由真机暴露）：
+### 10.1 版本边界：这些结论属于哪一代 Harness
+
+上表里带 "persona / 工具过滤" 的几行是**在 `dsh-v0.2.0-rc.2` 上测得的**。0.2.1 从启动请求里删掉了 `persona` 与 `toolFilter`（改为由 Agent Preset 提供人设与工具集），因此：
+
+| 项 | 0.2.0-rc.2 | 0.2.1-rc.2 及以后 |
+|---|---|---|
+| 逐子代理 persona | ✅ `persona` 字段 | ❌ 字段已删；等价物 = preset 里的一行 `@deepseek-ai/dsh-persona` |
+| 逐子代理工具过滤 | ✅ `[tools] allow/deny` | ❌ 字段已删，**官方无等价字段**；近似做法 = 用 preset 选择挂哪些工具插件行 |
+| 子代理启动入口 | `start()` + `startContinuable()` | `startActivation(spec)`，用 `delivery: 'caller' \| 'parent'` 区分两条语义 |
+| 能力位 | `agentOptions`/`persona`/`toolFilter`/`outputSchema`/`depthLimit` | `agentOptions`/`agentPreset`/`outputSchema`/`depthLimit` |
+| 结算通知 | ✅（`notifySettlement()`） | ✅ 未变，只是触发条件写成 `delivery === 'parent'` |
+
+因此 0.4.0 的验收**不是**看"persona 是否命中"，而是看"**preset 是否被选中并生效**"：委派档在子会话日志里检查 `agent-preset/selected` 出现在首条 `subagent/descriptor` **之前**（"独立选择"的判定规则），并核对 preset 的 persona 文本进入了子代理的系统提示。
+
+版本对应表见 [README · 支持的 Harness 版本](../README.md#支持的-harness-版本)；被移除字段的迁移写法见 [`migrating-to-0.4.md`](migrating-to-0.4.md)。
+
+### 10.2 真机验证期间发现并修复的缺陷
 
 1. **一次性运行漏装工具** —— Agent 在插件激活期间创建，`agent/created` 已被错过 → 增加激活时对已存在 Agent 的补装。
 2. **`max_depth = 0` 永远不可用** —— 该上限约束被创建子代理的深度，0 会让委派本身被拒 → 解析期判失败并解释。
-3. **工具名是部署相关的** —— 示例里的 `bash`/`terminal` 在 Windows headless 不存在，触发 `tools.restrict() names unknown global tools ...` → 示例改为可移植的 `write`/`edit`。
+3. **工具名是部署相关的** —— 示例里的 `bash`/`terminal` 在 Windows headless 不存在，触发 `tools.restrict() names unknown global tools ...` → 示例改为可移植的 `write`/`edit`。（这是 0.3.x 的历史；0.4.0 起 `[tools]` 已随 0.2.1 一并移除，本条留作版本边界的记录。）
 
 ## 11. 明确不支持的能力
 
-- **权限预设 / 沙箱 / 审批策略不可按定义设置**：委派时由父会话快照继承（Auto/Full 让子级获得相同权限预设；Read Only / Workspace Write 保留继承的沙箱覆盖与 `approval: never`）。"只读子代理"只能用 `[tools] deny` 近似，且需一并 deny shell 类工具。
+- **权限预设 / 沙箱 / 审批策略不可按定义设置**：委派时由父会话快照继承（Auto/Full 让子级获得相同权限预设；Read Only / Workspace Write 保留继承的沙箱覆盖与 `approval: never`）。"只读子代理"只能用一个只挂读工具的 Agent Preset 近似。
+- **逐名字的工具允许/拒绝不可按定义设置**：DSH 0.2.1 删掉了 `toolFilter`，官方**没有**提供替代字段（这是 0.4.0 移除 `[tools]` 的原因）。唯一的近似是"一个工具集合一个 preset"，用 `agent_preset` 选择它。注意 preset 行自己挂载的工具**不受该行自己的 `tools.restrict()` 约束**，所以"preset 只挂读工具"确实能得到一个只读子代理。
+- **逐子代理 persona 不可按定义设置**：同样在 0.2.1 被删；等价物是 preset 里的一行 `@deepseek-ai/dsh-persona`。
+- **`agent_preset` 只在挂载了 `agent-presets` 的组合里可用**：随发行版的 web 组合挂载它，headless/base 组合不挂；且**只有不继承父上下文的 provider 能选**（`spawn` 可以，`fork` 不可以）。
 - **provider 实例级设置不可按定义设置**：如 `claude-code` 的 `permissionMode`、`acp` 的 `command/args/env`、`dsh-sdk` 的 `profile/dshHome` —— 这些属于 profile 里的插件行；定义只能按名选择已注册的 provider。
 - **子代理工作目录不可按定义设置**：继承父会话 cwd（`acp`/`dsh-sdk` 的 provider 行可整体覆盖）。
-- **不能给子代理增加工具**：`[tools]` 只能做减法。
+- **不能给子代理增加工具**：以前是"`[tools]` 只能做减法"，现在连减法也不可按名字做；工具集恒等于所选 preset 的插件组合。
 - **未暴露 `run_in_background`**：后台语义由定义的 `mode` 决定。
 - **插件页配置已提供，但不通用**：web GUI 里本插件的配置显示在它自己的插件页上，通过 `plugins.bundle.config`（键 = bundle 包名）注册。它**不是**通用的 schema 驱动表单：Host 的 `dsh-settings` 只把 `.volatile()` 字段做成可编辑表单，而每个配置页都是插件自带的客户端包（`ctx.configForms.whileServed` + 插件页插槽）——通用页面目前没有客户端实现，所以任何插件想要 UI 都得自带半边；想放在官方栏就用 `plugins.item`，想放在自己的 bundle 页就用 `plugins.bundle.config`。
 - **`defaultProvider` / `projectAgentsDir` / `userAgentsDir` 不在设置页**：这些是部署布局，不是每用户偏好，只能在插件行 config 里改（因此它们也不是 volatile）。
-- **工具名写错只能在调用期发现**：DSH 未暴露可枚举的全局工具名清单，因此无法在安装期预检 `[tools]` 名字。
+- **工具名写错只能在调用期发现**：DSH 未暴露可枚举的全局工具名清单，因此无法在安装期预检工具名（0.4.0 起这一点只影响"你为某个 preset 选错工具插件"，本插件已不再接受工具名）。
 - **`continuable` 不支持 `output_schema`**：该能力只适用于一次性运行。
-- **结算通知需要直接父会话存活**：`notifySettlement()` 先查 `ctx.agents.get(parentSession)`，父已不存在就直接 `return`（**静默丢弃、无重放**）；`activation.announced` 为 false 时同样不投递。服务**没有持久化父邮箱**，通知只在父会话自己的 turn 流里追加（官方 `dsh-subagent` 的限制条目同此）。因此一次性父运行（headless / `-p` 单轮 / 脚本化）不应依赖 `continuable` 回传，改用 `one-shot`。本插件不参与该路径，也不做补偿。
+- **结算通知需要直接父会话存活**：`notifySettlement()` 先查 `ctx.agents.get(parentSession)`，父已不存在就直接 `return`（**静默丢弃、无重放**）；`activation.announced` 为 false 时同样不投递；`delivery === 'caller'` 的激活不投递。服务**没有持久化父邮箱**，通知只在父会话自己的 turn 流里追加（官方 `dsh-subagent` 的限制条目同此）。因此一次性父运行（headless / `-p` 单轮 / 脚本化）不应依赖 `continuable` 回传，改用 `one-shot`。本插件不参与该路径，也不做补偿。
+- **唯一一个定义失败 → 委派工具整体消失**：没有可用定义时插件**不注册工具**（这是既有的失败隔离设计：与其注册一个空枚举的工具，不如不注册）。升级 0.4.0 时若沿用旧字段且只有一个定义，现象就是"工具不见了"，唯一信号是宿主日志里那条 `warn`。
 
 ## 12. 实现结构
 
@@ -244,11 +289,11 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 | `src/index.ts` | 插件契约：`name` / `inject` / `Config`(Schemastery) / `apply` |
 | `src/plugin.ts` | 按 Agent 安装与释放、补装、失败上报、目录 watcher、`ctx.effect` 清理 |
 | `src/installation.ts` | 每个 Agent 的安装账本：串行化、卸载后不落地、watcher 期望目录集合 |
-| `src/harness.ts` | **唯一**的宿主能力探测点：可选服务（Agent 注册表 / 共享深度策略）与缺失时的明确降级日志 |
+| `src/harness.ts` | **唯一**的宿主能力探测点：可选服务（Agent 注册表 / 共享深度策略 / **Agent Preset 名册**）与缺失时的明确降级日志 |
 | `src/discovery.ts` | 用户/项目目录、项目根回溯、优先级、重名处理 |
-| `src/definitions.ts` | TOML 解析与字段校验、null-prototype 归一化 |
-| `src/mapping.ts` | 能力位规则表（`CAPABILITY_RULES`）、深度策略（`depthFor`）、启动请求构造、结果映射 |
-| `src/tool.ts` | 工具 schema、入参校验、委派执行 |
+| `src/definitions.ts` | TOML 解析与字段校验、已移除键的迁移文案、null-prototype 归一化 |
+| `src/mapping.ts` | 能力位规则表（`CAPABILITY_RULES`）、深度策略（`depthFor`）、激活请求构造、结果映射 |
+| `src/tool.ts` | 工具 schema、入参校验、委派执行（两条 `delivery` 路径）、`agent_preset` 运行时校验 |
 | `src/host.ts` | 宿主 ctx 的结构性类型声明（**不 import 任何 `@deepseek-ai/dsh-*`**） |
 | `src/skill.ts` | 包内 `assets/skill/SKILL.md` 的读取与技能 provider |
 | `src/client/index.tsx` | 客户端半边：插件自身页面上的配置区（`configForms.whileServed` + `plugins.bundle.config`，键 = bundle 包名），单文件以便 `tsc` 直出 |
@@ -256,7 +301,7 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 | `scripts/build-client.mjs` | 把 CJS 产物包装成 `window.__ModuleLoader__.load({id, factory})` 并校验自洽 |
 | `scripts/check-harness-shape.mjs` | 用已安装的 DSH 校验本插件依赖的声明是否还在（`npm run check:harness`） |
 
-宿主契约：`ctx.tools.register`、`ctx.subagents.{getProvider,list,start,startContinuable,resolveMaxDepth?}`、`ctx.on('agent/created'|'agent/disposed'|'loader/volatile-update')`、`ctx.inject`、`ctx.get('agents')`、`ctx.logger`、`ctx.effect`。
+宿主契约：`ctx.tools.register`、`ctx.subagents.{getProvider,list,startActivation,resolveMaxDepth?}`、`ctx.get('agentPresets')?.list()`（可选服务）、`ctx.on('agent/created'|'agent/disposed'|'loader/volatile-update')`、`ctx.inject`、`ctx.get('agents')`、`ctx.logger`、`ctx.effect`。
 客户端契约：`ctx.slots.{inject,register}`、`ctx.locale.register`、`ctx.configForms.{get,whileServed}`、`ctx.effect`。
 运行时依赖仅 `@deepseek-ai/schemastery`（Config schema）与 `smol-toml`；构建用 `tsc` 产出 ESM + `.d.ts`，客户端半边用 `tsc`（CJS）+ `scripts/build-client.mjs` 产出 `lib/client.js`，**不需要打包器**（客户端半边必须是单文件：shell 每个包只服务一个产物，factory 不能同步 require 兄弟 chunk）。
 
@@ -267,9 +312,16 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 | 守卫 | 位置 | 检查什么 |
 |---|---|---|
 | 架构单测 | `tests/architecture.spec.ts` | 宿主半边不得 import 任何 `@deepseek-ai/dsh-*`；客户端半边只能用 shell 模块表里的名字且不得把它列为依赖；manifest 名 = 补丁行名 = 客户端 `BUNDLE_NAME` = `ENTRY_ID`；`.volatile()` 字段恰好是卡片渲染的四个 |
-| 运行时声明检查 | `npm run check:harness` | 逐条核对已安装 DSH 的声明：`subagents.start` / `startContinuable` / `getProvider` / `resolveMaxDepth`、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`prepareContinuable`、`loader/volatile-update`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` / `listPlugins`、两个团队包。缺一条即 `DRIFT` + 非零退出，并指出要改的模块 |
+| 运行时声明检查 | `npm run check:harness` | 逐条核对已安装 DSH 的声明：`subagents.startActivation` / `getProvider` / `resolveMaxDepth`、`SubagentActivationSpec.delivery`、`agentPreset`（请求字段与能力位）、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`prepareContinuable`、`agentPresets.list`、`loader/volatile-update`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` / `listPlugins`、两个团队包，以及客户端半边用到的 `SettingsForm` / `SettingsValueField` / `SettingsFormModel` / `settingsTextField` / `Switch` / `createSnapshotStore` / `plugins.bundle.config` / `configForms.whileServed`。缺一条即 `DRIFT` + 非零退出，并指出要改的模块 |
 
-`check:harness` 刻意**不进 `npm test`**（单测不依赖 DSH 安装）；它在本地与发布前手动运行，且可用 `DSH_SHAPE_ROOT` 指向别的安装位置。
+客户端那几个包是 Web 端打包的**平台模块**，裸装 `@deepseek-ai/dsh` 时未必落在磁盘上（实测：`dsh-client-ui-primitives`、`dsh-client-store` 不在裸装树里）。因此这些条目标了 `optional`：**在磁盘上就核对，不在就打印 `SKIP`** —— 这样"这台机器没装那个包"与"那个包改名了"仍然是两回事。要看全 28 条真机核对，就在探针树里补装这三个包：
+
+```sh
+npm install --prefix <probe> @deepseek-ai/dsh-client-ui-primitives@0.2.1-rc.2 \
+  @deepseek-ai/dsh-client-store@0.2.1-rc.2 @deepseek-ai/dsh-client-ui-plugin-manager@0.2.1-rc.2
+```
+
+`check:harness` 刻意**不进 `npm test`**（单测不依赖 DSH 安装）；它在本地与发布前手动运行，且可用 `DSH_SHAPE_ROOT` 指向别的安装位置。**升级 DSH 后应当先对新装的那棵树跑一次**（`DSH_SHAPE_ROOT=<新安装>/node_modules/@deepseek-ai npm run check:harness`），因为该脚本核对的是**已编译产物**的字面量，而不是源码。
 
 ## 13. 测试与构建
 
@@ -282,7 +334,7 @@ npm run test           # 只跑测试；pretest 会先重建 lib/client.js
 
 - **两个编译面**：宿主用 `tsconfig.json` / `tsconfig.build.json`（ESM + 声明），客户端用 `tsconfig.client.json`（CJS，`removeComments`，输出到临时目录后由 `scripts/build-client.mjs` 包装）。两者互不包含对方的源文件（根配置 `exclude: ["src/client"]`）。
 - **`pretest` 会先构建客户端产物**：产物级测试读取真实的 `lib/client.js`，不先重建就会测到旧产物（这个坑真的踩过）。
-- **单测**（`npm test`）覆盖：TOML 解析与全部校验分支、目录优先级与重名（含"坏文件不得吞掉同名合法定义"）、目录不可读时上报而非当成空目录、项目根定位失败时仍加载用户定义、能力位规则表顺序、深度策略（显式 / Host / 不支持时不发）、结构化结果与失败诊断、工具 schema 与入参校验、委派成功/失败/取消、按 Agent 安装与释放、重叠安装串行化、卸载后不落地、watcher 重装/关闭/目录后出现、卸载清理、激活前已存在 Agent 的补装、volatile 惰性读取与 `$DSH_HOME` 解析。
+- **单测**（`npm test`）覆盖：TOML 解析与全部校验分支（含 `persona`/`tools` 的迁移文案、`agent_preset` 类型、连字符拼写）、目录优先级与重名（含"坏文件不得吞掉同名合法定义"）、目录不可读时上报而非当成空目录、项目根定位失败时仍加载用户定义、能力位规则表顺序（含 `agentPreset` 与"继承父上下文则不可选 preset"）、深度策略（显式 / Host / 不支持时不发）、结构化结果与失败诊断、工具 schema 与入参校验、委派成功/失败/取消、**两条 `delivery` 路径（`caller` 必须 dispose、`parent` 必须不 dispose）**、`agent_preset` 的两种运行时失败、按 Agent 安装与释放、重叠安装串行化、卸载后不落地、watcher 重装/关闭/目录后出现、卸载清理、激活前已存在 Agent 的补装、volatile 惰性读取与 `$DSH_HOME` 解析。
 - **架构单测**（`tests/architecture.spec.ts`）覆盖面见 §12b。
 - **产物级测试**（`tests/client-artifact.spec.ts`）在 Node 里用桩模块表执行真实的 `lib/client.js`，断言：加载器握手格式、导出契约（`apply`/`inject`/`NS`/`ENTRY_ID`/`BUNDLE_NAME`）、**只注册 `plugins.bundle.config` 一个插槽且键为 bundle 包名**（不得出现 `plugins.item`）、卡片渲染与开关暂存。产物缺失时该测试自跳过。
 - 测试使用假 `ctx` 与内存文件系统，**不启动 DSH、不读写真实 `$DSH_HOME`**。
@@ -322,15 +374,17 @@ dsh --profile plugin-dev --port 3099 --no-open     # 控制台会打印带 token
 
 ### 16.1 脚本化：`npm run check:e2e`
 
-以上手工步骤已脚本化为 `scripts/e2e.mjs`，按环境变量分三档（十个变量的完整含义、三档各自要预先启动什么、以及 PowerShell 写法，见 [README · 真机复验](../README.md#真机复验npm-run-checke2e)）：
+以上手工步骤已脚本化为 `scripts/e2e.mjs`，按环境变量分三档（十个变量的完整含义、三档各自要预先启动什么、以及 PowerShell 写法，见 [README · 真机复验](../README.md#真机复验npm-run-checke2e)）。前置条件里最容易踩的两个都在浏览器档：**实例本身要有模型**（否则页面能开、消息发不出去），以及**先手动选一次工作区**（那个选择器是系统目录框，CDP 驱动不了；工作区存在 `$E2E_HOME/storages/workspace.json`，也可以直接写该文件预置）：
 
 | 档 | 启动条件 | 观察点 |
 |---|---|---|
 | Loader | 只需已安装的 DSH；先 `npm run build`（加载 `lib/`） | 用真实 `cordis-plugin-loader` 建行、建 Agent、`entry.update` 写设置，检查到达 `tools.register` 的定义：即时安装、volatile 写入不重挂（`fiber.state === 2`）、关信任释放 fiber、重名双向剔除且原因进描述、`watchDefinitions` 两个方向 |
-| 委派 | 一次性 home + 打开信任的 profile + `E2E_API_KEY` | 真跑 `dsh --profile … --json`，从会话日志读 `request/header`：`agent_type` 枚举、`deny` 造成的工具缺失、AGENTS.md 注入子会话 |
-| 浏览器 | 上一档的条件，**外加**运行中的 Web 实例（`E2E_GUI`，含 token）与带 `--remote-debugging-port` 的独立浏览器 | C1 已在运行的会话里保存设置后，其**下一次请求**的枚举变化；C4 会话运行期间增删 `.toml`；C3 `continuable` 子代理的收尾文本以 `agent/inbox/spliced`（`next-turn` 或 `next-step`）回投父会话 |
+| 委派 | 一次性 home + 打开信任的 profile + `E2E_PROJECT`；profile 还要有 Agent Preset 注册表与一个示例 preset（`scripts/e2e-preset-profile.mjs` 先 `--dump-config` 问出这个组合缺哪几行再补，因此 headless 组合补两行、web 组合只补 preset 那行，且拒绝改 `~/.dsh`） | 真跑 `dsh --profile … --json`，从会话日志读 `request/header`：`agent_type` 枚举、AGENTS.md 注入子会话；**并在子会话日志里核对 preset 生效**：`agent-preset/selected` 出现在首条 `subagent/descriptor` **之前**，且该 preset 的 persona 标记串进了子代理的系统提示 |
+| 浏览器 | 上一档的条件，**外加**运行中的 Web 实例（`E2E_GUI`，含 token）与带 `--remote-debugging-port` 的独立浏览器（`E2E_CDP_PORT`；Chrome 136+ 禁止在默认 user-data-dir 上开远程调试，必须给独立的一次性 `--user-data-dir`） | C1 已在运行的会话里保存设置后，其**下一次请求**的枚举变化；C4 会话运行期间增删 `.toml`；C3 `continuable` 子代理的收尾文本以 `agent/inbox/spliced` 回投父会话，并按父会话当时的状态断言投递形态：目标是 `next-turn`（父空闲）就必须随后真的起一轮，目标是 `next-step`（父在跑）就必须在该轮内被 `removedCount` 消费掉——这两者由 Harness 按当时的忙碌程度自己选，脚本不预设是哪一个 |
 
-三档共同的约束：真实项目只读（跑前跑后对 `AGENTS.md` 与 `.dsh/agents/*.toml` 逐个 SHA-256 比对，并比对 `git status --porcelain`）；凭据只从环境变量读；浏览器档只连调用者指定的端口。该档**不在** `npm run check` 与 `prepublishOnly` 里——三档都需要真实环境，另两档会消耗真实额度。
+三档共同的约束：真实项目只读（跑前跑后对 `AGENTS.md` 与 `.dsh/agents/*.toml` 逐个 SHA-256 比对，并比对 `git status --porcelain`）；凭据只从环境变量读；浏览器档只连调用者指定的端口。该档**不在** `npm run check` 与 `prepublishOnly` 里。额度只有两处：委派档不给 `E2E_API_KEY` 时用本地模型桩，零额度；浏览器档在真实 Web 实例里跑真会话，按真实用量计。
+
+**委派档的模型来源**：不给 `E2E_API_KEY` 时，脚本自己起 `scripts/e2e-model-stub.mjs` —— 一个说 Messages 协议（`message_start` / `content_block_*` / `message_delta` / `message_stop`）的 HTTP+SSE 端点，判定规则是"父会话首轮且工具表里有 `subagent_custom` → 发一次 tool_use；系统提示里带 preset 标记（即子会话）→ 回文本；父会话已带 tool_result → 收尾"。于是模型以下全部是真的，只有"模型决定说什么"是脚本，这条路径**零额度**。它必须**独立进程**：委派档用 `spawnSync` 同步驱动 headless 运行，同进程的桩会被自己饿死。给了 key 则走真实 provider，两条路径共用同一套断言。
 
 ## 17. 内置 Skill
 包内 `assets/skill/SKILL.md` 是**模型可见**的定义撰写指南（英文，与工具描述一致），让用户在装完插件后用自然语言就能得到一份合法定义。
@@ -343,7 +397,7 @@ dsh --profile plugin-dev --port 3099 --no-open     # 控制台会打印带 token
 ```
 
 - `rank: 600` 与上游 `BUNDLED_SKILL_RANK` 一致：包内技能排在本地技能之后，重名时由本地技能胜出。
-- `resourceBase` 指向**包根**，因此技能正文里的 `guide/technical.md`、`guide/*.toml` 相对路径可直接被模型读取，不必在包内再复制一份模板。
+- `resourceBase` 指向**包根**，因此技能正文里的 `guide/technical.md`、`guide/migrating-to-0.4.md`、`guide/*.toml` 相对路径可直接被模型读取，不必在包内再复制一份模板。
 - 与 `src/host.ts` 的既有立场一致，这里同样**不 import `@deepseek-ai/dsh-skill`**：类型是结构性的，rank 是协议常量。
 
 **为什么用可选子 fiber**：`skills` 不在插件的 `inject` 导出里——否则没有技能服务的组合会让整行无法激活，委派功能一起失效。`contributeSkill` 用 `ctx.inject(['skills'], …)` 单独等待该服务，父行不受影响。

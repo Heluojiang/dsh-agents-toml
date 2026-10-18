@@ -22,14 +22,9 @@ llm_provider = "deepseek-official"
 model = "deepseek-v4-flash"
 reasoning_effort = "high"
 max_tokens = 4096
-persona = """
-You review code and never edit it.
-"""
+agent_preset = "reviewer"
 max_depth = 1
 output_schema = { type = "object", properties = { summary = { type = "string" } }, required = ["summary"] }
-
-[tools]
-deny = ["write", "edit"]
 `)
     assert.equal(outcome.ok, true)
     if (!outcome.ok) return
@@ -43,10 +38,9 @@ deny = ["write", "edit"]
       model: 'deepseek-v4-flash',
       reasoningEffort: 'high',
       maxTokens: 4096,
-      persona: 'You review code and never edit it.\n',
+      agentPreset: 'reviewer',
       maxDepth: 1,
       outputSchema: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] },
-      tools: { deny: ['write', 'edit'] },
       file: 'C:/defs/reviewer.toml',
       origin: 'user',
     })
@@ -62,11 +56,12 @@ deny = ["write", "edit"]
   })
 
   it('accepts hyphenated keys', () => {
-    const outcome = parse('name = "helper"\ndescription = "Helps."\nllm-provider = "deepseek-official"\nmax-depth = 2\n')
+    const outcome = parse('name = "helper"\ndescription = "Helps."\nllm-provider = "deepseek-official"\nmax-depth = 2\nagent-preset = "helper"\n')
     assert.equal(outcome.ok, true)
     if (!outcome.ok) return
     assert.equal(outcome.definition.llmProvider, 'deepseek-official')
     assert.equal(outcome.definition.maxDepth, 2)
+    assert.equal(outcome.definition.agentPreset, 'helper')
   })
 
   it('rejects an unknown key instead of ignoring it', () => {
@@ -114,11 +109,41 @@ deny = ["write", "edit"]
     assert.match(outcome.failure.reason, /max_depth must be at least 1/)
   })
 
-  it('rejects unknown keys inside the tools table', () => {
-    const outcome = parse('name = "h"\ndescription = "d"\n\n[tools]\nallow = ["read"]\nmode = "deny"\n')
+  it('explains how to migrate a key 0.4.0 removed', () => {
+    const persona = parse('name = "h"\ndescription = "d"\npersona = "You review code."\n')
+    assert.equal(persona.ok, false)
+    if (persona.ok) return
+    assert.match(persona.failure.reason, /persona was removed in 0\.4\.0/)
+    assert.match(persona.failure.reason, /agent_preset = "<preset id>"/)
+    assert.match(persona.failure.reason, /guide\/migrating-to-0\.4\.md/)
+
+    const tools = parse('name = "h"\ndescription = "d"\n\n[tools]\ndeny = ["write"]\n')
+    assert.equal(tools.ok, false)
+    if (tools.ok) return
+    assert.match(tools.failure.reason, /tools was removed in 0\.4\.0/)
+    assert.match(tools.failure.reason, /cannot be expressed/)
+  })
+
+  it('reports a removed key together with an unknown one', () => {
+    const outcome = parse('name = "h"\ndescription = "d"\npersona = "p"\npermissions = "full"\n')
     assert.equal(outcome.ok, false)
     if (outcome.ok) return
-    assert.match(outcome.failure.reason, /tools has unknown key\(s\): mode/)
+    assert.match(outcome.failure.reason, /persona was removed in 0\.4\.0/)
+    assert.match(outcome.failure.reason, /unknown key\(s\): permissions/)
+  })
+
+  it('rejects persona even when agent_preset is also present, so the old line must go', () => {
+    const outcome = parse('name = "h"\ndescription = "d"\nagent_preset = "helper"\npersona = "p"\n')
+    assert.equal(outcome.ok, false)
+    if (outcome.ok) return
+    assert.match(outcome.failure.reason, /persona was removed in 0\.4\.0/)
+  })
+
+  it('requires agent_preset to be a non-empty string', () => {
+    const outcome = parse('name = "h"\ndescription = "d"\nagent_preset = ""\n')
+    assert.equal(outcome.ok, false)
+    if (outcome.ok) return
+    assert.match(outcome.failure.reason, /agent_preset must be a non-empty string/)
   })
 
   it('reports a TOML syntax error without throwing', () => {

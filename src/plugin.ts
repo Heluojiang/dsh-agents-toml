@@ -237,6 +237,25 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
     )
   }
 
+  /**
+   * Read the preset ids the roster currently answers with.
+   *
+   * The roster is only consulted when a definition actually selects a preset,
+   * and a roster that throws (a broken composition) must not stop the tool from
+   * being installed: the call-time check then reports the real reason.
+   * @returns the ids, or an empty list when the roster is absent or failed.
+   */
+  const readPresetIds = async (): Promise<readonly string[]> => {
+    const roster = harness.presets()
+    if (roster === undefined) return []
+    try {
+      return (await roster.list()).map(row => row.id)
+    } catch (error) {
+      ctx.logger.warn(`dsh-agents-toml: could not read the agent preset roster: ${String(error)}`)
+      return []
+    }
+  }
+
   const installFor = async (agent: AgentLike): Promise<InstallationOutcome> => {
     const discovery = await load(agent)
     reportFailures(discovery)
@@ -253,19 +272,25 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
         name: definition.name,
         description: definition.description,
         continuable: definition.mode === 'continuable',
+        ...definition.agentPreset === undefined ? {} : { agentPreset: definition.agentPreset },
         inherits: provider?.inheritsParentContext ?? false,
       }
     })
+    const installedPresets = available.some(definition => definition.agentPreset !== undefined)
+      ? await readPresetIds()
+      : undefined
     const fiber = harness.registerToolIn(agent, scoped => {
       scoped.tools.register(buildDelegationTool({
         toolName: config.toolName(),
         defaultProvider: config.defaultProvider,
         reportFailuresToModel: config.reportFailuresToModel(),
         subagents: scoped.subagents,
+        presets: harness.presets(),
         hostDepth: () => harness.hostDepth(),
         load: (caller: AgentLike) => load(caller),
         installed,
         installedFailures: discovery.failures,
+        installedPresets,
       }))
     })
     ctx.logger.info(
