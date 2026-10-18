@@ -54,11 +54,16 @@ function bench(
     readonly hostDepth?: () => number | undefined
     /** Presets the composition's roster reports; omit for a composition without one. */
     readonly presets?: readonly string[]
+    /** Have the child's result reject, standing in for a child that failed outright. */
+    readonly reject?: Error
   } = {},
 ): Bench {
   const fake = createFakeSubagents(
     options.providers ?? [{ name: 'spawn', capabilities: FULL_CAPABILITIES, continuable: true }],
-    options.result === undefined ? {} : { result: options.result },
+    {
+      ...options.result === undefined ? {} : { result: options.result },
+      ...options.reject === undefined ? {} : { reject: options.reject },
+    },
   )
   const roster = options.presets === undefined
     ? undefined
@@ -128,6 +133,21 @@ describe('tool schema', () => {
     ]
     const reporting = bench([definition()], { failures }).tool
     assert.match(reporting.description, /Unavailable definitions: writer \(child LLM routing is unsupported by this provider\)/)
+  })
+
+  it('lists the agent presets a definition may select, and only when one does', () => {
+    // A mistyped `agent_preset` is the definition author's most likely mistake, and
+    // the ids are the only legal values; the model is the one reader of a definition,
+    // so it is told them rather than left to guess. The paragraph is also noise when
+    // no definition selects a preset, so it must not appear then.
+    const none = bench([definition()], { presets: ['reviewer', 'minimal'] }).tool
+    assert.doesNotMatch(none.description, /Agent presets available/)
+
+    const listing = bench([definition({ agentPreset: 'reviewer' })], { presets: ['reviewer', 'minimal'] }).tool
+    assert.match(listing.description, /Agent presets available in this composition: reviewer, minimal\./)
+
+    const empty = bench([definition({ agentPreset: 'reviewer' })], { presets: [] }).tool
+    assert.match(empty.description, /Agent presets available in this composition: \(none\)\./)
   })
 
   it('warns that a continuable subagent answers later than this call', () => {
@@ -205,6 +225,15 @@ describe('delegation', () => {
       result: { output: [{ type: 'text', text: 'partial' }], diagnostic: 'boom', stopReason: 'error' },
     })
     await assert.rejects(() => tool.execute(ARGS, exec), /did not complete: error[\s\S]*boom[\s\S]*partial/)
+  })
+
+  it('disposes the activation even when the child fails outright', async () => {
+    // `finally` is the only thing standing between a throwing child and a leaked
+    // activation, and a fake whose result always resolves cannot prove it is there.
+    const { tool, started, exec } = bench([definition()], { reject: new Error('child exploded') })
+    await assert.rejects(() => tool.execute(ARGS, exec), /child exploded/)
+    assert.equal(started.length, 1)
+    assert.equal(started[0]?.disposed, true)
   })
 
   it('names the configured subagents when the type is unknown', async () => {

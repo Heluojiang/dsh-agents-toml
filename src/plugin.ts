@@ -243,16 +243,19 @@ export function createPlugin(ctx: ContextLike, config: PluginConfig, deps: Plugi
    * The roster is only consulted when a definition actually selects a preset,
    * and a roster that throws (a broken composition) must not stop the tool from
    * being installed: the call-time check then reports the real reason.
-   * @returns the ids, or an empty list when the roster is absent or failed.
+   * @returns the ids; an empty list on a composition with no roster at all (no
+   * preset is selectable there, so the model-facing list really is empty), or
+   * `undefined` when a roster exists but could not be read — that is a fact
+   * nobody knows, and claiming "(none)" would contradict the call-time error.
    */
-  const readPresetIds = async (): Promise<readonly string[]> => {
+  const readPresetIds = async (): Promise<readonly string[] | undefined> => {
     const roster = harness.presets()
     if (roster === undefined) return []
     try {
       return (await roster.list()).map(row => row.id)
     } catch (error) {
       ctx.logger.warn(`dsh-agents-toml: could not read the agent preset roster: ${String(error)}`)
-      return []
+      return undefined
     }
   }
 

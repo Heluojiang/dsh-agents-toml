@@ -29,6 +29,7 @@ import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { definitionNames, presetDefinition, PRESET_MARKER } from './e2e-headless.mjs'
@@ -103,10 +104,31 @@ async function startStubModel({ pluginRoot: root, agentType, presetMarker }) {
   return { baseUrl, close: () => { child.kill() } }
 }
 
+/**
+ * Refuse to run against the operator's own DSH home.
+ *
+ * Both keyed tiers write into the home they are pointed at — the delegation tier
+ * adds Agent Preset rows to a profile patch, and the browser tier saves the trust
+ * switch into one and creates and deletes a file in the project — so
+ * `E2E_HOME=~/.dsh` would silently rewrite a live installation and a real
+ * project. The driver owns that decision rather than each tier, because the check
+ * is about the environment the caller supplied, not about either scenario.
+ * @param home - the `DSH_HOME` under test, when one was given.
+ */
+function refuseLiveHome(home) {
+  if (home === undefined) return
+  const real = resolve(homedir(), '.dsh')
+  const target = resolve(home)
+  if (target === real) {
+    throw new Error(`refusing to write into the live DSH home at ${target}; point E2E_HOME at a throwaway directory`)
+  }
+}
+
 const dshRoot = resolveDshRoot()
 const home = process.env.E2E_HOME
 const project = process.env.E2E_PROJECT
 const apiKey = process.env.E2E_API_KEY
+refuseLiveHome(home)
 const guiUrl = process.env.E2E_GUI
 
 console.log(`dsh:    ${dshRoot}`)

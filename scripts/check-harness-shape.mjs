@@ -79,6 +79,11 @@ if (!existsSync(join(base, 'dsh-subagent'))) {
  * frontend bundles (they are platform modules), so their declarations may be
  * absent from disk. Absent is then reported as SKIP, while a present file that
  * lost the name is still drift.
+ *
+ * `contains` must be the longest literal that is still stable. A bare identifier
+ * proves only that some name starts with it (`SettingsForm` also prefixes eight
+ * sibling exports; `"name"` appears in every `package.json`), so a declaration
+ * that can be renamed without the check noticing is worse than no check.
  * @typedef {{ file: string, contains: string, why: string, optional?: boolean }} Requirement
  */
 
@@ -110,18 +115,25 @@ const REQUIREMENTS = [
   // dsh-plugin-manager: the inventory the warning reads.
   { file: 'dsh-plugin-manager/lib/types/index.d.ts', contains: 'listBundles()', why: 'pluginManager.listBundles' },
   { file: 'dsh-plugin-manager/lib/types/index.d.ts', contains: 'listPlugins()', why: 'pluginManager.listPlugins' },
-  // The Agent Teams packages the client half detects.
-  { file: 'dsh-experimental-agent-team/package.json', contains: '"name"', why: 'the Agent Teams module name' },
-  { file: 'dsh-experimental-tool-agent-team/package.json', contains: '"name"', why: 'the Agent Teams tool module name' },
+  // The Agent Teams packages the client half detects. The full scoped name is the
+  // declaration that matters: `"name"` alone appears in every package.json, so it
+  // would stay green through exactly the rename this check exists to catch.
+  { file: 'dsh-experimental-agent-team/package.json', contains: '"@deepseek-ai/dsh-experimental-agent-team"', why: 'the Agent Teams module name' },
+  { file: 'dsh-experimental-tool-agent-team/package.json', contains: '"@deepseek-ai/dsh-experimental-tool-agent-team"', why: 'the Agent Teams tool module name' },
   // The client half: hand-declared in src/client/shell-modules.d.ts, so nothing
   // else in this repository would notice these names moving. These packages are
   // platform modules the Web frontend bundles, so a bare install may not carry
   // them on disk — hence `optional`: present means checked, absent means SKIP.
-  { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'SettingsForm', why: 'the settings card component', optional: true },
+  // Each literal is the exported binding itself, not a bare word that another
+  // export happens to contain: `SettingsForm` alone is a prefix of eight sibling
+  // names, so it would stay green after the component was removed. The others
+  // (`SettingsValueField`, `SettingsFormModel`, `settingsTextField`) are complete
+  // names, and no `contains` can be satisfied by a shorter one.
+  { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'export { SettingsForm }', why: 'the settings card component', optional: true },
   { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'SettingsValueField', why: 'the settings card field', optional: true },
   { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'SettingsFormModel', why: 'the settings form model', optional: true },
   { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'settingsTextField', why: 'the text-field spec', optional: true },
-  { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'Switch', why: 'the boolean switch', optional: true },
+  { file: 'dsh-client-ui-primitives/lib/types/index.d.ts', contains: 'export { Switch }', why: 'the boolean switch', optional: true },
   { file: 'dsh-client-store/lib/types/index.d.ts', contains: 'createSnapshotStore', why: 'the card snapshot store', optional: true },
   { file: 'dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts', contains: 'plugins.bundle.config', why: 'the bundle config slot the card registers', optional: true },
   // The rest of the client half's contract, read off the packages the Host serves.

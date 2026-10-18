@@ -80,12 +80,13 @@ export interface FakeSubagents {
 /**
  * Build a fake subagent registry.
  * @param providers - providers to register.
- * @param options - terminal result for one-shot runs and the host depth setting.
+ * @param options - terminal result for one-shot runs, an optional rejection standing
+ * in for a child that failed outright, and the host depth setting.
  * @returns the service plus the activations it observed.
  */
 export function createFakeSubagents(
   providers: readonly FakeProviderInit[],
-  options: { readonly result?: SubagentResult; readonly depth?: number } = {},
+  options: { readonly result?: SubagentResult; readonly reject?: Error; readonly depth?: number } = {},
 ): FakeSubagents {
   const started: StartedRun[] = []
   const registry = new Map<string, SubagentProvider>()
@@ -107,7 +108,9 @@ export function createFakeSubagents(
       return Promise.resolve({
         childId: `child-${started.length}`,
         messageId: 'message-1',
-        result: Promise.resolve(result),
+        result: options.reject === undefined
+          ? Promise.resolve(result)
+          : Promise.reject(options.reject),
         dispose: () => {
           entry.disposed = true
           return Promise.resolve()

@@ -198,11 +198,15 @@ function buildDescription(options: DelegationToolOptions): string {
   if (options.installed.some(entry => entry.agentPreset !== undefined)) {
     // The ids are the only legal `agent_preset` values a definition can name, so
     // the model's own view of this tool lists them rather than letting a typo in
-    // a definition surface as one failed delegation.
-    const presets = options.installedPresets ?? []
-    parts.push(
-      `Agent presets available in this composition: ${presets.length === 0 ? '(none)' : presets.join(', ')}.`,
-    )
+    // a definition surface as one failed delegation. An unreadable roster is
+    // `undefined` rather than an empty list: "(none)" would contradict what the
+    // call-time check says a moment later.
+    const presets = options.installedPresets
+    if (presets !== undefined) {
+      parts.push(
+        `Agent presets available in this composition: ${presets.length === 0 ? '(none)' : presets.join(', ')}.`,
+      )
+    }
   }
   if (options.reportFailuresToModel && options.installedFailures.length > 0) {
     const unavailable = options.installedFailures
