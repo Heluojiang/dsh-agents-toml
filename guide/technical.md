@@ -300,6 +300,7 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 | `src/client/shell-modules.d.ts` | 浏览器模块表的契约声明（jsx-runtime、ui-primitives、client/store） |
 | `scripts/build-client.mjs` | 把 CJS 产物包装成 `window.__ModuleLoader__.load({id, factory})` 并校验自洽 |
 | `scripts/check-harness-shape.mjs` | 用已安装的 DSH 校验本插件依赖的声明是否还在（`npm run check:harness`） |
+| `scripts/check-docs.mjs` | 校验文档里的相对链接与同文档锚点（`npm run check:docs`） |
 
 宿主契约：`ctx.tools.register`、`ctx.subagents.{getProvider,list,startActivation,resolveMaxDepth?}`、`ctx.get('agentPresets')?.list()`（可选服务）、`ctx.on('agent/created'|'agent/disposed'|'loader/volatile-update')`、`ctx.inject`、`ctx.get('agents')`、`ctx.logger`、`ctx.effect`。
 客户端契约：`ctx.slots.{inject,register}`、`ctx.locale.register`、`ctx.configForms.{get,whileServed}`、`ctx.effect`。
@@ -315,6 +316,8 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 | 运行时声明检查 | `npm run check:harness` | 逐条核对已安装 DSH 的声明：`subagents.startActivation` / `getProvider` / `resolveMaxDepth`、`SubagentActivationSpec.delivery`、`agentPreset`（请求字段与能力位）、`SubagentResult.structured`、`depthLimit`、`inheritsParentContext`、`prepareContinuable`、`agentPresets.list`、`loader/volatile-update`、`skills.registerProvider`、`plugin-manager/changed`、`remote.<namespace>`、`listBundles` / `listPlugins`、两个团队包，以及客户端半边用到的 `SettingsForm` / `SettingsValueField` / `SettingsFormModel` / `settingsTextField` / `Switch` / `createSnapshotStore` / `plugins.bundle.config` / `configForms.whileServed`。缺一条即 `DRIFT` + 非零退出，并指出要改的模块 |
 
 客户端那几个包是 Web 端打包的**平台模块**，裸装 `@deepseek-ai/dsh` 时未必落在磁盘上（实测：`dsh-client-ui-primitives`、`dsh-client-store` 不在裸装树里）。因此这些条目标了 `optional`：**在磁盘上就核对，不在就打印 `SKIP`** —— 这样"这台机器没装那个包"与"那个包改名了"仍然是两回事。要看全 28 条真机核对，就在探针树里补装这三个包：
+
+每条 `contains` 都写**能证明该声明的那个字面量**，而不是一个恰好也被别的东西包含的短词：两个团队包写全限定包名（`"name"` 在任何 `package.json` 里都有，改了名也照样绿），组件写导出语句本身（`SettingsForm` 同时是另外八个导出名的前缀，组件被删掉它依然匹配）。判据很简单 —— **这条字面量被改掉之后，检查必须变红**。
 
 ```sh
 npm install --prefix <probe> @deepseek-ai/dsh-client-ui-primitives@0.2.1-rc.2 \
@@ -333,6 +336,7 @@ npm run test           # 只跑测试；pretest 会先重建 lib/client.js
 ```
 
 - **两个编译面**：宿主用 `tsconfig.json` / `tsconfig.build.json`（ESM + 声明），客户端用 `tsconfig.client.json`（CJS，`removeComments`，输出到临时目录后由 `scripts/build-client.mjs` 包装）。两者互不包含对方的源文件（根配置 `exclude: ["src/client"]`）。
+- **`check:docs` 查两类链接**：指向仓库内文件的相对链接必须存在且是文件（不是目录）；同一文档内的裸锚点必须对得上该文档的某个标题（按 GitHub 的 slug 规则算）。只查文件存在性会漏掉"章节改名后导航项指向空处"这种坏法 —— 它不报错、点进去只是回到页首，而唯一发现它的时机是有人真去点。
 - **`pretest` 会先构建客户端产物**：产物级测试读取真实的 `lib/client.js`，不先重建就会测到旧产物（这个坑真的踩过）。
 - **单测**（`npm test`）覆盖：TOML 解析与全部校验分支（含 `persona`/`tools` 的迁移文案、`agent_preset` 类型、连字符拼写）、目录优先级与重名（含"坏文件不得吞掉同名合法定义"）、目录不可读时上报而非当成空目录、项目根定位失败时仍加载用户定义、能力位规则表顺序（含 `agentPreset` 与"继承父上下文则不可选 preset"）、深度策略（显式 / Host / 不支持时不发）、结构化结果与失败诊断、工具 schema 与入参校验、委派成功/失败/取消、**两条 `delivery` 路径（`caller` 必须 dispose、`parent` 必须不 dispose）**、`agent_preset` 的两种运行时失败、按 Agent 安装与释放、重叠安装串行化、卸载后不落地、watcher 重装/关闭/目录后出现、卸载清理、激活前已存在 Agent 的补装、volatile 惰性读取与 `$DSH_HOME` 解析。
 - **架构单测**（`tests/architecture.spec.ts`）覆盖面见 §12b。
@@ -382,9 +386,9 @@ dsh --profile plugin-dev --port 3099 --no-open     # 控制台会打印带 token
 | 委派 | 一次性 home + 打开信任的 profile + `E2E_PROJECT`；profile 还要有 Agent Preset 注册表与一个示例 preset（`scripts/e2e-preset-profile.mjs` 先 `--dump-config` 问出这个组合缺哪几行再补，因此 headless 组合补两行、web 组合只补 preset 那行，且拒绝改 `~/.dsh`） | 真跑 `dsh --profile … --json`，从会话日志读 `request/header`：`agent_type` 枚举、AGENTS.md 注入子会话；**并在子会话日志里核对 preset 生效**：`agent-preset/selected` 出现在首条 `subagent/descriptor` **之前**，且该 preset 的 persona 标记串进了子代理的系统提示 |
 | 浏览器 | 上一档的条件，**外加**运行中的 Web 实例（`E2E_GUI`，含 token）与带 `--remote-debugging-port` 的独立浏览器（`E2E_CDP_PORT`；Chrome 136+ 禁止在默认 user-data-dir 上开远程调试，必须给独立的一次性 `--user-data-dir`） | C1 已在运行的会话里保存设置后，其**下一次请求**的枚举变化；C4 会话运行期间增删 `.toml`；C3 `continuable` 子代理的收尾文本以 `agent/inbox/spliced` 回投父会话，并按父会话当时的状态断言投递形态：目标是 `next-turn`（父空闲）就必须随后真的起一轮，目标是 `next-step`（父在跑）就必须在该轮内被 `removedCount` 消费掉——这两者由 Harness 按当时的忙碌程度自己选，脚本不预设是哪一个 |
 
-三档共同的约束：真实项目只读（跑前跑后对 `AGENTS.md` 与 `.dsh/agents/*.toml` 逐个 SHA-256 比对，并比对 `git status --porcelain`）；凭据只从环境变量读；浏览器档只连调用者指定的端口。该档**不在** `npm run check` 与 `prepublishOnly` 里。额度只有两处：委派档不给 `E2E_API_KEY` 时用本地模型桩，零额度；浏览器档在真实 Web 实例里跑真会话，按真实用量计。
+三档共同的约束：真实项目只读（跑前跑后对 `AGENTS.md` 与 `.dsh/agents/*.toml` 逐个 SHA-256 比对，并比对 `git status --porcelain`）；凭据只从环境变量读；浏览器档只连调用者指定的端口；**`E2E_HOME` 指向 `~/.dsh` 时驱动直接拒绝启动** —— 两个带 key 的档都会往那个 home 里写（委派档往 profile 补 preset 行，浏览器档保存信任开关，并在项目里建一个再删一个 `.toml`），这道闸放在 `scripts/e2e.mjs` 而不是各档自己，因为它判的是调用者给的环境，不是某个场景。该档**不在** `npm run check` 与 `prepublishOnly` 里。额度只有两处：委派档不给 `E2E_API_KEY` 时用本地模型桩，零额度；浏览器档在真实 Web 实例里跑真会话，按真实用量计。
 
-**委派档的模型来源**：不给 `E2E_API_KEY` 时，脚本自己起 `scripts/e2e-model-stub.mjs` —— 一个说 Messages 协议（`message_start` / `content_block_*` / `message_delta` / `message_stop`）的 HTTP+SSE 端点，判定规则是"父会话首轮且工具表里有 `subagent_custom` → 发一次 tool_use；系统提示里带 preset 标记（即子会话）→ 回文本；父会话已带 tool_result → 收尾"。于是模型以下全部是真的，只有"模型决定说什么"是脚本，这条路径**零额度**。它必须**独立进程**：委派档用 `spawnSync` 同步驱动 headless 运行，同进程的桩会被自己饿死。给了 key 则走真实 provider，两条路径共用同一套断言。
+**委派档的模型来源**：不给 `E2E_API_KEY` 时，脚本自己起 `scripts/e2e-model-stub.mjs` —— 一个说 Messages 协议（`message_start` / `content_block_*` / `message_delta` / `message_stop`）的 HTTP+SSE 端点，判定规则是"请求里出现委派指令且尚未带 tool_result → 发一次 tool_use；系统提示里带 preset 标记（即子会话）→ 回文本；父会话已带 tool_result → 收尾"。两个容易踩的点写在这里：判定只看**对话本身**（`system` + `messages`），不看 `tools[].input_schema` —— 工具表里必然有 `subagent_custom` 这个名字，把它算进去会让**每一轮**都被判成"要委派"；会话标题调用被单独识别并回一个短标题，否则每个会话在侧边栏里长得一样，浏览器档靠标题找会话就失效了。于是模型以下全部是真的，只有"模型决定说什么"是脚本，这条路径**零额度**。它必须**独立进程**：委派档用 `spawnSync` 同步驱动 headless 运行，同进程的桩会被自己饿死。给了 key 则走真实 provider，两条路径共用同一套断言。
 
 ## 17. 内置 Skill
 包内 `assets/skill/SKILL.md` 是**模型可见**的定义撰写指南（英文，与工具描述一致），让用户在装完插件后用自然语言就能得到一份合法定义。
