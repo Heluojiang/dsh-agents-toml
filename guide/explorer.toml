@@ -34,8 +34,10 @@ enabled = true
 #        自动投递 `Background subagent <id> finished …` + `Its closing message:`。要求中途提前
 #        告知时，务必写明**只发增量**，否则子代理会把整份结论中途也发一遍，父会话收到两份重叠内容。
 #        续聊要用官方 `dsh-tool-subagent-control` 的 send_message（参数是 agent_id，
-#        只授权直接父子之间）；若该 profile 启用了 Agent Teams，它会禁用这个控制工具，
-#        换成按 target 寻址队友的同名工具 —— 但上面的结算通知**不受影响**，仍会送达。
+#        只授权直接父子之间）；若该 profile 启用了 Agent Teams，headless 档下这个控制工具
+#        会被禁用（换成按 target 寻址队友的同名工具），web 档下则可能因官方 preset 重挂
+#        而仍在 —— 但上面的结算通知**两档都不受影响**，仍会送达。另外本插件起的子代理
+#        不在团队花名册上，团队的消息/中断/清理不覆盖它（详见 README 该节）。
 mode = "continuable"
 
 # [可选] 默认取插件行 defaultProvider（默认 spawn）。

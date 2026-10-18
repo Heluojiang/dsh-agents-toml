@@ -7,7 +7,9 @@
 | 插件版本 | 支持的 DSH |
 |---|---|
 | `v0.3.4` | `dsh-v0.2.0-rc.2` |
-| `v0.4.0` | `dsh-v0.2.1-rc.2` 及以上 |
+| `v0.4.0` / `v0.4.1` | `dsh-v0.2.1-rc.2` 及以上 |
+
+`v0.4.1` 是**纯文档修订**（与 0.4.0 行为相同）：只改了"与 Agent Teams 不支持组合"一节的论证与引文。定义文件不需要任何改动。
 
 在 `dsh-v0.2.0-rc.2` 上安装 0.4.0 会被**拒绝**（`engines.dsh` 与 `peerDependencies` 都声明了 `>=0.2.1-rc.2`）。确实要试，用 `dsh plugin allow-version` 放行 —— 但**不要这么做**：0.4.0 调用的 `ctx.subagents.startActivation` 在 0.2.0 上不存在，第一次委派就会抛 `startActivation is not a function`。拒绝安装是刻意设计，比运行时才炸好。
 

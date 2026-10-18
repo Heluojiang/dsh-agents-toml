@@ -47,9 +47,11 @@ dsh plugin --profile web add @heluojiang/dsh-agents-toml
 | 插件版本 | 支持的 DSH |
 |---|---|
 | `v0.3.4` | `dsh-v0.2.0-rc.2` |
-| `v0.4.0` | `dsh-v0.2.1-rc.2` 及以上 |
+| `v0.4.0` / `v0.4.1` | `dsh-v0.2.1-rc.2` 及以上 |
 
 **升级到 0.4.0 之前请先读 [0.4.0 升级说明](guide/migrating-to-0.4.md)**：`persona` 与 `[tools]` 两个字段已被 DSH 0.2.1 移除，0.4.0 因此不再接受它们（沿用旧字段的文件会被判失败，并给出迁移提示）。字段对应关系、Agent Preset 的等价写法、以及"唯一一个定义失败会导致委派工具整体消失"这类现象都在那份文档里。
+
+> `v0.4.1` 与 `v0.4.0` 的**行为完全相同**：它只修正了"与 Agent Teams 不支持组合"这一节的论证（原文把该组合包的四个 `disabled` 行当成了对全部 profile 生效，见下文该节），并补齐被截断的官方引文。升级无需改任何定义文件。
 
 版本边界是**机器可读并强制执行**的：`package.json` 里同时声明了 `engines.dsh: ">=0.2.1-rc.2"` 与 `peerDependencies: {"@deepseek-ai/dsh": ">=0.2.1-rc.2"}`。
 
@@ -117,16 +119,22 @@ dsh web --patch ./dev.patch.yml
 
 **本插件按"具名子代理"设计，与官方的「智能体团队」组合包不支持组合使用。请先在「插件 → 官方 → 智能体团队」把它关掉，再使用本插件。**
 
-官方对该组合包的说明就是它的设计意图：*Ordinary subagent delegation and overlapping global child controls are disabled*（`@deepseek-ai/dsh-experimental-agent-team-profile` 的 README）。其 `cordis.patch.yml` 会禁用四行——`tool-subagent-control`、`tool-subagent-list-agents`、`tool-subagent`、`tool-subagent-fork`——并改挂 `tool-agent-team`。于是：
+**这是设计取舍，不是缺陷**：两者是两套**不可合并的协调模型**。团队组合包的模型是"持久花名册 + 共享任务板"——`spawn_teammate` 造出有名字、可寻址的队友（`send_message` 的参数是 **`target`**），协作经 `team_task_*` 进行；本插件的模型相反：匿名的、一次性的子代理，身份只有一个子代理 id，结论靠收尾通知回投。同时启用时，Harness 会往系统提示里写"你是 Team Lead、用 `send_message({ target })`"，而本插件又要求模型去起一个没有名字的孩子 —— **用户拿到的是一份自相矛盾的指令**。第三方插件不该与第一方特性争这一条，所以让路。
 
-| 影响 | 具体表现 |
-|---|---|
-| **continuable 子代理无法主动追问** | 续聊只能靠官方 `dsh-tool-subagent-control` 的 `send_message(agent_id)`；它被禁用后，拿子代理 id 去调同名工具只会得到 `active teammate "<id>" not found`。（子代理**收尾的最终文本仍会回传**：那条结算通知由 `dsh-subagent` 的续接管理器发出，团队组合包只禁用四个工具行，不触及它） |
-| **同名工具不同含义** | 团队工具的 `send_message` 参数是 `target`（队友）、`list_agents` 列的是队友；拿子代理 id 去调只会得到 `active teammate "<id>" not found`，模型与人都容易误用 |
-| **官方委派工具消失** | 官方 `subagent` / `subagent_fork`（标准预设里默认 `backgroundMode: continuable`）被换成队友工具 —— 这不是本插件的工具，但会改变模型的默认选择 |
-| **模型可能不再选你的定义** | 两套工具同处一个作用域，多智能体任务上模型可能优先用团队工具 |
+官方对该组合包的说明就是它的设计意图：*Ordinary subagent delegation and overlapping global child controls are disabled; Workflow can still create fresh children*（`@deepseek-ai/dsh-experimental-agent-team-profile` 的 README）。注意后半句：它禁用的是"普通委派与重叠的全局子代理控制"，**workflow 仍能起新子代理**。
 
-**仍然照常工作**：`agent_type` 委派、TOML 解析与全部校验、能力位判定、`max_depth`、`agent_preset`、`output_schema`、设置页四个开关、内置 Skill、定义热更新 —— 这些都不经过团队工具。
+其 `cordis.patch.yml` 会禁用四行——`tool-subagent-control`、`tool-subagent-list-agents`、`tool-subagent`、`tool-subagent-fork`——并改挂 `tool-agent-team`。**但这四行只在宿主面被禁用**：官方 `dsh-web-app` 本来就已经在宿主面禁用了同样的四行（理由是"每个 preset 自己决定它的 Agent 看到哪些委派工具"），再由 `presets/standard.patch.yml` 把它们**重挂进 preset 作用域**，而补丁定位不进入 preset 的子行。官方组合包自己承认这一点：*Preset-scoped child controls — Web presets can still mount continuable Subagent controls in their own scope; this top-level bundle does not replace those registrations.* 因此下表**按 profile 分开**读：
+
+| 影响 | headless / 没有 preset 的 profile | web（挂了官方 preset） |
+|---|---|---|
+| **续聊 continuable 子代理** | 被替换：全局 `send_message(agent_id)` 消失，只剩按 `target` 寻址队友的那个，拿子代理 id 去调只会得到 `active teammate "<id>" not found` | **preset 作用域里那套仍在**：`send_message(agent_id)` / `list_agents` 可能照常可用 —— 但这是官方明说"不替换"的残留，不要依赖 |
+| **同名工具不同含义** | 团队工具的 `send_message` 参数是 `target`（队友）、`list_agents` 列的是队友 | 同名工具可能**两套并存**，模型与人都更容易误用 |
+| **官方委派工具消失** | 官方 `subagent` / `subagent_fork`（标准预设里默认 `backgroundMode: continuable`）被换成队友工具 —— 这不是本插件的工具，但会改变模型的默认选择 | 同名 `subagent` / `subagent_fork` 可能在 preset 作用域里仍在 |
+| **模型可能不再选你的定义** | 两套工具同处一个作用域，多智能体任务上模型可能优先用团队工具 | 同左 |
+
+**与 profile 无关的那一条（也是真正的问题）**：本插件起的子代理**不在团队花名册上**。团队域的成员判定对非 Team 子代理一律返回"不是成员"，它的 `send_message` 要求收发双方都是花名册成员，**它的清理也只 drain 花名册成员**（官方组合包原文：*Non-Team children remain untouched*）。于是你的子代理变成**无人管理**——团队的消息、中断、清理都不覆盖它。危险之处在于它**不报错**：子代理照跑、收尾通知照到，看起来一切正常，只有协调与清理悄悄不管它。
+
+**仍然照常工作**：`agent_type` 委派（本插件直接调用 `ctx.subagents.startActivation()`，与官方 `tool-subagent*` 无关）、TOML 解析与全部校验、能力位判定、`max_depth`、`agent_preset`、`output_schema`、设置页四个开关、内置 Skill、定义热更新 —— 这些都不经过团队工具；**continuable 的收尾通知也照常投递**（那条通知由 `dsh-subagent` 的续接管理器发出，与团队组合包无关）。
 
 **自查与关闭**：
 
@@ -352,7 +360,7 @@ Host 的深度是**绝对深度上限**，而 Harness 规定：请求里带 `max
 两条硬限制：
 
 - **`one-shot` 子代理永远无法续聊**；兄弟、隔代祖先、自身也都不被授权。
-- **启用 Agent Teams 后"续聊"这条会被它替换掉。** `dsh-experimental-agent-team-profile` 会禁用 `tool-subagent-control`（连同 `tool-subagent`、`tool-subagent-fork`、`list-agents`），改挂 `tool-agent-team`：那个 `send_message` 的参数是 **`target`**（队友），对子代理 id 只会报 `active teammate "<id>" not found`。此时 `agent_type` 委派本身照常可用，**结算通知也照常投递**，只是父代理无法再主动追问该子代理 —— 这是该实验性 profile 的既定取舍，不是本插件的问题。
+- **Agent Teams 会改变"续聊"这条，但程度随 profile 不同。** 官方组合包禁用 `tool-subagent-control`（连同 `tool-subagent`、`tool-subagent-fork`、`list-agents`）、改挂 `tool-agent-team`，那个 `send_message` 的参数是 **`target`**（队友），对子代理 id 只会报 `active teammate "<id>" not found` —— 该禁用只落在**宿主面**，所以 headless 档就是如此。**web 档不同**：官方 `dsh-web-app` 的 preset 把同样四行重挂进了 preset 作用域，而补丁定位进不到那里，所以按 `agent_id` 续聊**可能照常可用**；那是官方明说"不替换"的残留，不要依赖。无论哪一档，`agent_type` 委派与**收尾通知**都照常工作，而本插件起的子代理**不在团队花名册上**（团队的消息、中断、清理都不覆盖它，且失败是静默的）—— 完整说明见[与智能体团队（Agent Teams）不支持组合使用](#与智能体团队agent-teams不支持组合使用)。
 
 ### 常见误解
 
@@ -360,10 +368,10 @@ Host 的深度是**绝对深度上限**，而 Harness 规定：请求里带 `max
 前半句错、后半句对。`started subagent <childId>` 就是这次工具调用的全部返回值（官方语义：初始 prompt 入队被接受即 resolve），**结论不在返回值里**；但子代理收尾时宿主**会**投递一条带它最终文本的结算通知（见上一节），父会话空闲时会被唤醒。要注意这个回传是"最后一条消息的文本"，中途的工具输出、推理都不在其中 —— 所以**结论必须写在收尾消息里**，该定义所选 Agent Preset 的 persona 要这样要求它。
 
 **误解 2：任何叫 `send_message` 的工具都能继续子代理。**
-只有官方 `dsh-tool-subagent-control` 的那个可以：参数是 **`agent_id`**，只授权**直接父子**之间，返回的是**送达确认**而不是答复。Agent Teams 的同名工具参数是 **`target`**、寻址的是**队友**：拿子代理 id 去调只会得到 `active teammate "<id>" not found`。
+只有官方 `dsh-tool-subagent-control` 的那个可以：参数是 **`agent_id`**，只授权**直接父子**之间，返回的是**送达确认**而不是答复。Agent Teams 另有一个同名工具，参数是 **`target`**、寻址的是**队友**：拿子代理 id 去调只会得到 `active teammate "<id>" not found`。**但要分清是哪一个在生效**：团队组合包的禁用只落在宿主面，web 档的官方 preset 会在 preset 作用域里**重挂**官方那一套（官方 README 明说"不替换这些注册"），所以 web 档下可能**两套并存** —— 看到 `target` 不代表 `agent_id` 那个一定不在。
 
 **误解 3：装了 Agent Teams 就不能用本插件了，或者装了就收不到子代理结论。**
-本插件的 `agent_type` 委派直接调用 `ctx.subagents.startActivation()`，与官方 `tool-subagent*` 无关，所以**委派本身照常可用**；**结算通知也照常投递**（它由续接管理器发出，团队组合包只禁用四个工具行）。但官方**不支持**这个组合使用方式：被 Agent Teams 替换掉的正是"官方直连委派"那一路 —— 父代理续聊 continuable 子代理的控制工具、`list_agents`（变成列队友）、以及官方 `subagent` / `subagent_fork` 工具本身。因此本插件**不推荐**、也不支持与它同时启用；设置页检测到团队开启时会显示红色提示（提示框自身可关闭；**关闭团队仍需你自己在插件页操作，本插件不会代为改动 profile**），完整说明见[与智能体团队（Agent Teams）不支持组合使用](#与智能体团队agent-teams不支持组合使用)。
+本插件的 `agent_type` 委派直接调用 `ctx.subagents.startActivation()`，与官方 `tool-subagent*` 无关，所以**委派本身照常可用**；**收尾通知也照常投递**（它由 `dsh-subagent` 的续接管理器发出，与团队组合包无关）。官方**不支持**这个组合使用方式，但理由不是"某个工具没了"，而是更根本的一条：**本插件起的子代理不在团队花名册上**，团队的消息、中断与**清理**都不覆盖它，而这一切**不报错**。同时启用还会让模型收到两份互相矛盾的协调指令（"你是 Team Lead、按 `target` 发言" vs "起一个匿名子代理"）。因此本插件**不推荐**、也不支持与它同时启用；设置页检测到团队开启时会显示红色提示（提示框自身可关闭；**关闭团队仍需你自己在插件页操作，本插件不会代为改动 profile**），完整说明见[与智能体团队（Agent Teams）不支持组合使用](#与智能体团队agent-teams不支持组合使用)。
 
 **误解 4：`continuable` 保证父会话一定收得到结论。**
 收得到的前提是**父会话在子代理收尾时仍然存在**。结算通知没有持久化邮箱，只在父会话自己的 turn 流里追加；父会话先结束就静默丢失，也不会重放。一次性运行（headless / `-p` 单轮 / 脚本化）要用 `one-shot` 定义，它的结论就是工具返回值。

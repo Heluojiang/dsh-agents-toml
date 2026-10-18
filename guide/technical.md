@@ -139,7 +139,7 @@ Select-String -Path $env:TEMP\dump.txt -Pattern 'dsh-agents-toml' -Context 0,8
 6. 解析深度策略（`depthFor`）：定义写了 `max_depth` 就原样下发；否则**仅当 provider 具备 `depthLimit`** 时才下发 Host 的 `subagent.maxDepth`，否则不下发并记一条 warn（原因见第 9 节末）。
 7. 检查取消信号 → 分派，两条路都走**同一个**入口 `ctx.subagents.startActivation(spec)`，只差 `delivery`：
    - `one-shot` → `delivery: 'caller'`：结果只回给本次调用方，随后 `await activation.dispose()`（**总是 dispose**）；
-   - `continuable` → `delivery: 'parent'`：由续接管理器在结算时向父 Agent 投递结算通知（因此需要 session persistence），**不 dispose** —— 后台子代理必须活得比这次调用久；立即返回 `started subagent ${childId}`。该 Promise 在**入队被接受**时就 resolve（不等待子代理开跑或落盘），措辞与官方 `subagent` 工具在 continuable 下逐字一致 —— **结论不在本次返回值里**。子代理结算时由 `dsh-subagent` 的续接管理器 `notifySettlement()` 向父会话投递一条 user 消息：开头是结局句（`Background subagent <id> finished and will do no further work unless you send it more.`，另有 stopped / ran out of room / declined / failed 四种），随后是子代理**最终 assistant 输出中的非空文本块**（无非空文本时写 `It left no closing message.`）；该投递在 `delivery === 'parent'` 时发生，父会话空闲会被唤醒，且**不受 Agent Teams 影响**。不回传的是中间过程（工具输出、推理、中途文本），那些靠 `send_message` 往返；续聊（steer / wake / 冷启动）属于官方 `dsh-tool-subagent-control`，本插件不重复实现。
+   - `continuable` → `delivery: 'parent'`：由续接管理器在结算时向父 Agent 投递结算通知（因此需要 session persistence），**不 dispose** —— 后台子代理必须活得比这次调用久；立即返回 `started subagent ${childId}`。该 Promise 在**入队被接受**时就 resolve（不等待子代理开跑或落盘），措辞与官方 `subagent` 工具在 continuable 下逐字一致 —— **结论不在本次返回值里**。子代理结算时由 `dsh-subagent` 的续接管理器 `notifySettlement()` 向父会话投递一条 user 消息：开头是结局句（`Background subagent <id> finished and will do no further work unless you send it more.`，另有 stopped / ran out of room / declined / failed 四种），随后是子代理**最终 assistant 输出中的非空文本块**（无非空文本时写 `It left no closing message.`）；该投递在 `delivery === 'parent'` 时发生，父会话空闲会被唤醒，且**不受 Agent Teams 影响**。不回传的是中间过程（工具输出、推理、中途文本），那些靠 `send_message` 往返；续聊（steer / wake / 冷启动）属于官方 `dsh-tool-subagent-control`，本插件不重复实现。**注意这套消息/中断/清理都是"子代理自己的"体系**：启用 Agent Teams 后，本插件起的子代理不在团队花名册上，团队那一套不覆盖它（见 §18a）。
 8. 结果映射（`describeResult`）：捕获到结构化值 → 返回该值的 JSON 文本（子代理同时留了文本时附在其后，中间空一行）；否则 `completed` → 返回最终文本（无文本时给占位句）；非 `completed` → 工具报错，内容是 `the subagent did not complete: <stopReason>` + 提供方诊断 + 部分输出。定义配了 `output_schema` 却没拿到值时，错误里补一句 `the child did not produce a value for output_schema`（Harness 会把这类"跑完但没交值"改写成 `stopReason: error`，不补这句会看起来像模型崩了）。
 
 委派不修改父会话，因此声明为并发安全（`isConcurrencySafe: () => true`）。
@@ -277,6 +277,7 @@ subagent "x" cannot run on provider "codex": child LLM routing is unsupported by
 - **未暴露 `run_in_background`**：后台语义由定义的 `mode` 决定。
 - **插件页配置已提供，但不通用**：web GUI 里本插件的配置显示在它自己的插件页上，通过 `plugins.bundle.config`（键 = bundle 包名）注册。它**不是**通用的 schema 驱动表单：Host 的 `dsh-settings` 只把 `.volatile()` 字段做成可编辑表单，而每个配置页都是插件自带的客户端包（`ctx.configForms.whileServed` + 插件页插槽）——通用页面目前没有客户端实现，所以任何插件想要 UI 都得自带半边；想放在官方栏就用 `plugins.item`，想放在自己的 bundle 页就用 `plugins.bundle.config`。
 - **`defaultProvider` / `projectAgentsDir` / `userAgentsDir` 不在设置页**：这些是部署布局，不是每用户偏好，只能在插件行 config 里改（因此它们也不是 volatile）。
+- **不与 Agent Teams 组合使用**：本插件起的子代理不在团队花名册上，团队的消息、中断、清理都不覆盖它，且不报错；同时启用还会让模型收到两份矛盾的协调指令。判定依据见 §18a，检测实现见 §18b。
 - **工具名写错只能在调用期发现**：DSH 未暴露可枚举的全局工具名清单，因此无法在安装期预检工具名（0.4.0 起这一点只影响"你为某个 preset 选错工具插件"，本插件已不再接受工具名）。
 - **`continuable` 不支持 `output_schema`**：该能力只适用于一次性运行。
 - **结算通知需要直接父会话存活**：`notifySettlement()` 先查 `ctx.agents.get(parentSession)`，父已不存在就直接 `return`（**静默丢弃、无重放**）；`activation.announced` 为 false 时同样不投递；`delivery === 'caller'` 的激活不投递。服务**没有持久化父邮箱**，通知只在父会话自己的 turn 流里追加（官方 `dsh-subagent` 的限制条目同此）。因此一次性父运行（headless / `-p` 单轮 / 脚本化）不应依赖 `continuable` 回传，改用 `one-shot`。本插件不参与该路径，也不做补偿。
@@ -410,9 +411,40 @@ dsh --profile plugin-dev --port 3099 --no-open     # 控制台会打印带 token
 
 **发现与刷新**：`tool-skill` 把技能目录作为持久会话目录注入（`<available_skills>` 块），并订阅 `skills/change`——因此注册发生在**运行中的会话**里也会推送一份替换目录，无需重启会话。
 
-## 18. 与 Agent Teams 的互斥关系（检测实现）
+## 18. 与 Agent Teams 的互斥关系
 
-用户文档只保留结论与后果（README 的「与智能体团队不支持组合使用」），这里记录实现。
+用户文档只保留结论与后果（README 的「与智能体团队不支持组合使用」），这里记录**判定依据**与检测实现。
+
+### 18a. 为什么互斥（0.2.1-rc.2 上的静态核对）
+
+**不是一个工具没了，而是两套协调模型不可合并。** 团队组合包的模型是"持久花名册 + 共享任务板"：`spawn_teammate` 造出有名字的队友，队友之间按 `target` 寻址，协作经 `team_task_*` 走。本插件的模型相反：匿名的一次性子代理，身份只有一个子代理 id，结论靠收尾通知回投。同时启用时 Harness 会往系统提示写入团队身份与"用 `send_message({ target })`"的指引，而本插件又要求模型起一个没有名字的孩子 —— 用户拿到的是自相矛盾的指令。
+
+**真正的机制性冲突在花名册**（与 profile 无关）：
+
+| 事实 | 依据 |
+|---|---|
+| 团队域只认花名册成员，非 Team 子代理一律不是成员 | `dsh-experimental-agent-team/lib/index.js` 的 `membership()` / `tryMembership()`（约 :868-903） |
+| 团队的 `send_message` 要求收发双方都是成员，否则抛 `active teammate "<name>" not found`（`TEAM_MEMBER_NOT_FOUND`） | 同文件约 :831 |
+| 团队清理只 drain 花名册成员 | 同文件约 :982-994（`liveChildrenByRoot` 按 journal 成员过滤） |
+| 官方原话 | `dsh-experimental-agent-team/README.md`：*Non-Team children remain untouched* |
+
+所以本插件起的子代理是**无人管理**的：团队的消息、中断、清理都不覆盖它。危险在于它**不报错** —— 子代理照跑、收尾通知照到，只有协调与清理悄悄不管它。
+
+**那四个 `disabled` 只在宿主面生效**（这条常被误读）：
+
+| 事实 | 依据 |
+|---|---|
+| 团队组合包禁用 `tool-subagent-control` / `tool-subagent-list-agents` / `tool-subagent` / `tool-subagent-fork`，改挂 `tool-agent-team` | `dsh-experimental-agent-team-profile/cordis.patch.yml` |
+| 官方 `dsh-web-app` **本来就**在宿主面禁用了同样四行，理由是"每个 preset 自己决定它的 Agent 看到哪些委派工具" | `dsh-web-app/cordis.patch.yml` 约 :555-565 |
+| 再由官方 preset 把它们**重挂进 preset 作用域** | `dsh-web-app/presets/standard.patch.yml` 约 :89-103（`preset-standard.config.plugins` 下） |
+| 补丁定位只递归 `entry.group && Array.isArray(entry.config)`，而 preset 的行挂在 `config.plugins` 下 ⇒ **够不着** | `dsh-app-boot/lib/index.js` 的 `applyEntryPatches()` 约 :64-71 |
+| 官方原话 | `dsh-experimental-agent-team-profile/README.md`：*Preset-scoped child controls — Web presets can still mount continuable Subagent controls in their own scope; this top-level bundle does not replace those registrations.* |
+
+**推论**：headless / 无 preset 的 profile 上"续聊被替换"成立；**web 档上不一定** —— 官方 preset 里那套 `send_message(agent_id)` / `list_agents` 可能照常可用。因此用户文档按 profile 分栏写，不写成"必然失效"。
+
+**仍然成立的**：`agent_type` 委派（本插件直接调 `ctx.subagents.startActivation()`，团队组合包不动 `subagents` 服务与 `spawn`/`fork` provider）、以及 continuable 的**收尾通知**（由 `dsh-subagent` 的续接管理器 `notifySettlement()` 发出，唯一的提前返回条件是 `!activation.announced || activation.delivery === "caller"`，与团队无关）。
+
+### 18b. 检测实现（客户端）
 
 **为什么是客户端检测**：要提示的是"用户在插件页看到的那个开关"，权威数据源就是插件页自己读的那份清单，因此客户端半边直接用**同一个远程命名空间**：
 
