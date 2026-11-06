@@ -33,6 +33,10 @@ enabled = true
 #        `Agent <子代理id> sent a message:` + 正文（只表示"还在跑，先报一件事"）；收尾由宿主
 #        自动投递 `Background subagent <id> finished …` + `Its closing message:`。要求中途提前
 #        告知时，务必写明**只发增量**，否则子代理会把整份结论中途也发一遍，父会话收到两份重叠内容。
+#        dsh 0.2.2 起这种重复被宿主主动压掉：子代理如果在结束前刚发过消息，结算通知会用
+#        `It sent you a message just before finishing, so its closing message is omitted.`
+#        取代整段 `Its closing message:`，此时收尾正文段不存在，内容只在前面那条
+#        `Agent <子代理id> sent a message:` 里 —— 所以「结论写在最后一条消息里」这条依旧是硬要求。
 #        续聊要用官方 `dsh-tool-subagent-control` 的 send_message（参数是 agent_id，
 #        只授权直接父子之间）；若该 profile 启用了 Agent Teams，headless 档下这个控制工具
 #        会被禁用（换成按 target 寻址队友的同名工具），web 档下则可能因官方 preset 重挂

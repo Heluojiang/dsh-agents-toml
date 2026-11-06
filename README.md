@@ -47,11 +47,13 @@ dsh plugin --profile web add @heluojiang/dsh-agents-toml
 | 插件版本 | 支持的 DSH |
 |---|---|
 | `v0.3.4` | `dsh-v0.2.0-rc.2` |
-| `v0.4.0` / `v0.4.1` | `dsh-v0.2.1-rc.2` 及以上 |
+| `v0.4.0` / `v0.4.1` / `v0.4.2` | `dsh-v0.2.1-rc.2` 及以上（`0.2.2-rc.1` 已实测） |
 
 **升级到 0.4.0 之前请先读 [0.4.0 升级说明](guide/migrating-to-0.4.md)**：`persona` 与 `[tools]` 两个字段已被 DSH 0.2.1 移除，0.4.0 因此不再接受它们（沿用旧字段的文件会被判失败，并给出迁移提示）。字段对应关系、Agent Preset 的等价写法、以及"唯一一个定义失败会导致委派工具整体消失"这类现象都在那份文档里。
 
 > `v0.4.1` 与 `v0.4.0` 的**行为完全相同**：它只修正了"与 Agent Teams 不支持组合"这一节的论证（原文把该组合包的四个 `disabled` 行当成了对全部 profile 生效，见下文该节），并补齐被截断的官方引文。升级无需改任何定义文件。
+
+> `v0.4.2` 与 `v0.4.1` 的**行为完全相同**，只为了 `dsh-v0.2.2-rc.1`：该版本没有删除或改名本插件依赖的任何声明（`startActivation`、`AgentPresetRegistry.list()`、`agents.list()`、`agent/created`、`tools.register`、`skills.registerProvider`、`loader/volatile-update`、`remote.$on`、`plugins.bundle.config` 全部仍在），所以 0.4.1 的构建产物可原样运行。0.4.2 补的是三件事：① 记下 0.2.2 新增的结算通知句式（子代理结束前刚发过消息时，`Its closing message:` 整段被 `It sent you a message just before finishing, so its closing message is omitted.` 取代）；② 把 `check:harness` 的声明守护扩到上述四处；③ 让 e2e 的委派档/浏览器档从项目定义里读 `agent_preset`（而非写死），这样 `NOAI_develop_01` 这类"每个角色一个 preset"的项目才能被真机验证。`engines.dsh` 保持 `>=0.2.1-rc.2` 不收窄 —— 0.2.2 已满足，收窄只会挡住仍可用的 0.2.1 用户。
 
 版本边界是**机器可读并强制执行**的：`package.json` 里同时声明了 `engines.dsh: ">=0.2.1-rc.2"` 与 `peerDependencies: {"@deepseek-ai/dsh": ">=0.2.1-rc.2"}`。
 
@@ -344,7 +346,7 @@ Host 的深度是**绝对深度上限**，而 Harness 规定：请求里带 `max
    <子代理最后的文本>
    ```
 
-   父会话空闲时会被它唤醒；挂掉/超限/拒绝/失败的收尾也各有对应句式（`was stopped before it finished` / `ran out of room` / `declined the task` / `failed before it finished`），没有文本时写 `It left no closing message.`。**不回传**的是中间过程：工具输出、推理、以及中途说过但不在收尾文本里的话 —— 这些要靠消息往返。
+   父会话空闲时会被它唤醒；挂掉/超限/拒绝/失败的收尾也各有对应句式（`was stopped before it finished` / `ran out of room` / `declined the task` / `failed before it finished`），没有文本时写 `It left no closing message.`。**0.2.2 起还有第五种收尾**：如果子代理在结束前刚给父会话发过一条消息（宿主因此已经把你的内容给过父会话），通知用 `It sent you a message just before finishing, so its closing message is omitted.` 取代整段 `Its closing message:` —— 也就是说**这时没有收尾正文段**，父会话要读的是前面那条 `Agent <childId> sent a message:`。**不回传**的是中间过程：工具输出、推理、以及中途说过但不在收尾文本里的话 —— 这些要靠消息往返。
 
    **两种投递形态不要混判**：子代理**运行中**主动 `send_message(agent_id = 父代理 id)` 时，父会话看到的形态是 `Agent <子代理id> sent a message:` + 正文 —— 它只表示"还在跑，先报一件事"；只有**这一轮结束**后由宿主自动投递的 `Background subagent <id> finished …` + `Its closing message:` 才表示"已收尾，以下是结论"。发送方会同步拿到投递确认（`message delivered to agent <父会话id>`），失败时返回错误、可见且可重发；这条确认是**送达**而非答复。
 3. **父会话必须在它收尾时仍然存在**：结算通知由续接管理器投递给**当时仍活着的直接父 Agent** —— 服务没有持久化父邮箱，父会话若已结束（典型是 `dsh … "任务"` 这类一次性 headless 运行，父轮次先 `turn/end`），通知无处投递、**静默丢弃且不重放**。注意这与模型侧 `send_message` 不同：那条失败会返回错误，而结算通知这一路不会报错。因此**需要当场拿到结论的一次性任务请用 `one-shot` 定义**（`one-shot` 的结论就是工具返回值，不经过这条路）；`continuable` 留给父会话能持续在线的场景（GUI 会话）。
@@ -479,7 +481,7 @@ npm run build          # 产出 lib/*.js、lib/types/*.d.ts 与 lib/client.js
 | `E2E_HOME` | 无 | 一次性 `DSH_HOME`。委派档与浏览器档**必需**（要有 profile 与会话目录） |
 | `E2E_PROFILE` | `plugin-dev` | `E2E_HOME` 里给委派档用的 profile 名 |
 | `E2E_GUI_PROFILE` | `plugin-gui` | 浏览器实例所用 profile 名；浏览器档通过它找到 `cordis.patch.yml` 来读回设置写入 |
-| `E2E_PROJECT` | 无 | 被检查的**真实项目**（要有 `.dsh/agents/*.toml`）。脚本只读它：跑前跑后逐个 SHA-256 比对并核对 `git status --porcelain` |
+| `E2E_PROJECT` | 无 | 被检查的**真实项目**（要有 `.dsh/agents/*.toml`）。脚本只读它：跑前跑后逐个 SHA-256 比对并核对 `git status --porcelain`；同时**从这里的定义读出 `agent_preset`**，据此给一次性 profile 补 preset 行（浏览器档在启动实例前也要先用它跑一次 `ensurePresetProfile`） |
 | `E2E_API_KEY` | 无 | provider key。不给时脚本自己起一个**脚本化模型桩**（`scripts/e2e-model-stub.mjs`，说同一套 Messages 协议并必定发起委派），委派档照跑、不花额度；给了就走真实 provider |
 | `E2E_BASE_URL` | 无 | provider 的 base URL；key 不是发给默认端点时设置 |
 | `E2E_GUI` | 无 | 运行中的 Web 实例 URL（**含 token**）。给了才跑浏览器档 |
@@ -494,7 +496,7 @@ npm install && npm run build
 npm run check:e2e          # 或 node scripts/e2e.mjs
 ```
 
-**② 委派档**——先造一个一次性 home 和一个打开信任的 profile，**并让这个 profile 具备 `agent_preset` 需要的东西**（一个 preset 注册表和一个示例 preset，见 [0.4.0 升级说明](guide/migrating-to-0.4.md)）。不给 key 时脚本会自动改用**脚本化模型桩**：它说同一套 provider 协议、必定发起一次委派，因此模型以下的一切（Loader、`subagents` 服务、Agent Preset 注册表、本插件的工具）都是真的，只有"模型说什么"是脚本；这条路径**不花额度**。给了 key 就用真实 provider：
+**② 委派档**——先造一个一次性 home 和一个打开信任的 profile，**并让这个 profile 具备 `agent_preset` 需要的东西**（一个 preset 注册表，外加**项目定义里写到的每一个 preset id**，见 [0.4.0 升级说明](guide/migrating-to-0.4.md)）。不给 key 时脚本会自动改用**脚本化模型桩**：它说同一套 provider 协议、必定发起一次委派，因此模型以下的一切（Loader、`subagents` 服务、Agent Preset 注册表、本插件的工具）都是真的，只有"模型说什么"是脚本；这条路径**不花额度**。给了 key 就用真实 provider：
 
 ```sh
 export E2E_HOME=/tmp/dsh-e2e
@@ -505,14 +507,14 @@ dsh plugin --profile plugin-dev add "$PWD"
 # 在 profile 补丁里打开 trustProjectAgents（见「插件设置项」）
 # 并补上这个组合缺的 Agent Preset 行（headless 组合默认不挂注册表；web 组合已经挂了，
 # 脚本会自己看出来只补缺的那部分，因此两种 profile 都能用同一条命令）：
-#   node -e "import('./scripts/e2e-preset-profile.mjs').then(m=>m.ensurePresetProfile({home:process.env.E2E_HOME,profile:'plugin-dev',dshRoot:process.env.E2E_DSH_ROOT}))"
+#   node -e "import('./scripts/e2e-preset-profile.mjs').then(m=>m.ensurePresetProfile({home:process.env.E2E_HOME,profile:'plugin-dev',dshRoot:process.env.E2E_DSH_ROOT,project:process.env.E2E_PROJECT}))"
 
 node scripts/e2e.mjs                            # 用模型桩，零额度
 E2E_API_KEY=sk-... node scripts/e2e.mjs         # 用真实模型
 export E2E_BASE_URL=https://your-endpoint/v1    # 可选：key 不发给默认端点时
 ```
 
-这一档的断言全部读会话日志，因此**不依赖模型说了什么**；`scripts/e2e-preset-profile.mjs` 会先问 Harness 本人（`--dump-config`）这个组合里有没有 preset 注册表，只补缺的行，写下的那段带 `# ── dsh-agents-toml e2e` 标记，重跑会跳过，且拒绝改写 `~/.dsh`。
+这一档的断言全部读会话日志，因此**不依赖模型说了什么**；`scripts/e2e-preset-profile.mjs` 会先问 Harness 本人（`--dump-config`）这个组合里有没有 preset 注册表、以及项目定义里写到的每个 `agent_preset` 是否已声明，只补缺的行（`NOAI_develop_01` 这类"每个角色一个 preset"的项目会一次补 5 行），写下的那段带 `# ── dsh-agents-toml e2e` 标记，重跑会跳过，且拒绝改写 `~/.dsh`。
 
 **③ 浏览器档**——需要三样东西同时活着：一个 Web 实例、一个带远程调试端口的独立浏览器、以及它们所属的一次性 home。缺任何一样这一档都跑不起来，所以下面按顺序给出全部命令。
 
@@ -520,26 +522,32 @@ export E2E_BASE_URL=https://your-endpoint/v1    # 可选：key 不发给默认�
 > 1. **实例要有模型。** 这一档在真实 Web 实例里跑真会话，所以 `dsh --profile plugin-gui` 启动时必须带上 provider 凭据（或指向委派档那个模型桩：`DEEPSEEK_BASE_URL=http://127.0.0.1:<stub 端口>/v1 DEEPSEEK_API_KEY=stub-key`）。没有模型时页面能开，但第一条消息就发不出去，报错会以"找不到输入框/composer"的形式出现。
 > 2. **要有一个已选中的工作区。** 新实例首次进入是"选择工作区"页，而那个选择器是系统目录选择框，CDP 驱动不了它。请先手动选一次（选你的 `E2E_PROJECT`），之后脚本就能直接用；工作区是持久化的（`$E2E_HOME/storages/workspace.json`），也可以直接写这个文件预置。
 
+脚本自己会处理另外三件事（都是 Web UI 的形态，不是本插件的行为）：首次运行的预览弹窗会盖住整页，它会先点掉 `继续`；侧边栏默认**收起**，而收起时不渲染任何会话行，所以它先点「打开侧边栏」；插件行、导航项、新建会话都是**纯图标按钮**，它按 `aria-label`（`查看 <包名>` / `插件` / `新建会话`）定位。会话日志也不按"最新目录"取 —— 同一会话组里每个子代理也各有一份日志，子代理收尾会把它顶到最新，脚本改为按"该会话自己的 `user/message` 含本次 prompt 标记"定位。
+
 ```sh
 # 1) 隔离 home 与 profile（不要用你日常那个 profile）
 export E2E_HOME=/tmp/dsh-e2e
 dsh --profile plugin-gui --from-default-profile web
 dsh plugin --profile plugin-gui add "$PWD"
 
-# 2) 起 Web 实例（用私有端口，避免和日常实例抢）；控制台会打印带 token 的 URL
-#    web 组合自带 preset 注册表，所以不用像委派档那样补 profile
+# 2) 先把项目定义里写到的 preset 行补进这个 profile，**再**启动实例。
+#    web 组合自带 preset 注册表，但不含项目自己的 preset id；在实例启动前写好，
+#    组合从一开始就完整（运行中再写要靠 profile 补丁热重载，多一步不确定性）。
+export E2E_PROJECT=/path/to/your/project
+node -e "import('./scripts/e2e-preset-profile.mjs').then(m=>m.ensurePresetProfile({home:process.env.E2E_HOME,profile:'plugin-gui',dshRoot:process.env.E2E_DSH_ROOT,project:process.env.E2E_PROJECT}))"
+
+# 3) 起 Web 实例（用私有端口，避免和日常实例抢）；控制台会打印带 token 的 URL
 export DEEPSEEK_API_KEY=sk-...        # 或指向模型桩
 dsh --profile plugin-gui --port 3931 --no-open
 #    记下形如 http://127.0.0.1:3931/?token=<token> 的地址
 
-# 3) 起浏览器并开远程调试（用独立 user-data-dir：Chrome 136+ 禁止在默认
+# 4) 起浏览器并开远程调试（用独立 user-data-dir：Chrome 136+ 禁止在默认
 #    user-data-dir 上开远程调试，用默认目录会静默失败）
 #    Chrome/Edge 均可，端口与下一步的 E2E_CDP_PORT 必须一致
 chrome --remote-debugging-port=9222 --user-data-dir=/tmp/cdp-profile \
        --no-first-run --no-default-browser-check about:blank
 
-# 4) 跑这一档
-export E2E_PROJECT=/path/to/your/project
+# 5) 跑这一档（E2E_PROJECT 已在第 2 步设置）
 export E2E_GUI='http://127.0.0.1:3931/?token=<token>'
 node scripts/e2e.mjs
 ```

@@ -101,7 +101,12 @@ const REQUIREMENTS = [
   { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'readonly inheritsParentContext:', why: 'the conversation-sharing descriptor' },
   { file: 'dsh-subagent/lib/types/types.d.ts', contains: 'prepareContinuable?', why: 'the continuable capability signal' },
   // dsh-agent-preset-registry: the roster an `agent_preset` value is checked against.
-  { file: 'dsh-agent-preset-registry/lib/types/index.d.ts', contains: 'list()', why: 'agentPresets.list' },
+  { file: 'dsh-agent-preset-registry/lib/types/index.d.ts', contains: 'list(): Promise<AgentPreset[]>', why: 'agentPresets.list' },
+  // dsh-agent: the install path hangs off this one event, and the project root is
+  // read off the Agent's own session, so both are pinned here.
+  { file: 'dsh-agent/lib/types/runtime-types.d.ts', contains: "'agent/created'(this: Scoped<Agent>", why: 'the per-Agent install trigger' },
+  { file: 'dsh-agent/lib/types/runtime-types.d.ts', contains: 'readonly session: Session', why: 'the Agent session that names the project root' },
+  { file: 'dsh-agent/lib/types/index.d.ts', contains: 'list(): Agent[]', why: 'agents.list, the already-created sweep' },
   // cordis-plugin-loader: the only signal a volatile settings write reaches the
   // plugin through, because such a write does not remount the row.
   { file: 'cordis-plugin-loader/lib/index.js', contains: 'loader/volatile-update', why: 'the volatile settings-write event' },
@@ -109,6 +114,9 @@ const REQUIREMENTS = [
   { file: 'dsh-skill/lib/types/index.d.ts', contains: 'registerProvider(', why: 'skills.registerProvider' },
   // dsh-api-remotes: the event the client half refreshes on.
   { file: 'dsh-api-remotes/lib/index.js', contains: 'plugin-manager/changed', why: 'the forwarded plugin-manager change event' },
+  // dsh-typert-protocol: how the client half subscribes to it. The gateway's own
+  // client typings only re-export this surface, so the declaration lives here.
+  { file: 'dsh-typert-protocol/lib/types/types.d.ts', contains: '$on<Event extends TypertRemoteEvent>', why: 'remote.$on' },
   // dsh-api-gateway: how a Remote namespace becomes a service. Since 0.2.1 the
   // client bundle is split by platform, so the browser artifact is the one to read.
   { file: 'dsh-api-gateway/lib/client.browser.js', contains: '`remote.${namespace}`', why: 'the remote.<namespace> service key' },

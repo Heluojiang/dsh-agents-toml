@@ -56,6 +56,10 @@ test('the asset states how a continuable run reports back, since that decides th
   // promise delivery to a run that has already ended.
   assert.match(content, /no durable parent mailbox/)
   assert.match(content, /one-shot` instead/)
+  // Harness 0.2.2 suppresses the closing segment when the child messaged the
+  // parent last, so the guide has to name that shape: a child told to send its
+  // conclusion mid-run would otherwise leave the notice with no text at all.
+  assert.match(content, /closing message is omitted/)
 })
 
 test('a frontmatter name that disagrees with the registered one is rejected', () => {
