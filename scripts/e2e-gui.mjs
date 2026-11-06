@@ -55,6 +55,44 @@ function latestSessions(root, count) {
     .slice(0, count)
 }
 
+/** The text every `user/message` of a session carries, concatenated. */
+function userText(dir) {
+  return readSession(dir)
+    .filter(event => event.type === 'user/message')
+    .map(event => (event.data?.content ?? []).map(part => part?.text ?? '').join(''))
+    .join('\n')
+}
+
+/**
+ * The session directory whose own prompts contain `marker`.
+ *
+ * The group also holds a directory per subagent, and a child that settles after
+ * the parent's turn makes its directory the newest one by mtime — so "newest
+ * directory" is not the session the scenario just typed into. A child's prompt is
+ * the delegated instruction, never the marker the scenario typed, so the marker
+ * identifies the parent exactly.
+ * @param root - the session group directory.
+ * @param marker - text the scenario's own prompt contained.
+ * @param timeoutMs - how long to wait for the log to appear.
+ * @returns the matching session, or `undefined`.
+ */
+async function sessionWithMarker(root, marker, timeoutMs = 45000) {
+  const found = await waitFor(() => {
+    const hits = readdirSync(root)
+      .map(name => ({ name, dir: join(root, name), mtime: statSync(join(root, name)).mtimeMs }))
+      .sort((left, right) => right.mtime - left.mtime)
+      .filter(entry => {
+        try {
+          return userText(entry.dir).includes(marker)
+        } catch {
+          return false
+        }
+      })
+    return hits[0]
+  }, timeoutMs)
+  return found
+}
+
 /** The `agent_type` enum the `index`-th request of a session offered the model. */
 function enumOf(dir, index) {
   const headers = readSession(dir).filter(event => event.type === 'request/header')
@@ -62,6 +100,33 @@ function enumOf(dir, index) {
   const tools = header?.data?.header?.tools ?? []
   const delegation = tools.find(tool => tool.name === 'subagent_custom')
   return delegation?.parameters?.properties?.agent_type?.enum ?? null
+}
+
+/**
+ * Dismiss the first-run preview notice, when this instance shows one.
+ *
+ * A brand-new profile opens a modal preview over the page, which hides the
+ * sidebar and the composer; every scenario would otherwise fail on "no composer"
+ * rather than on what it is testing. Absent (an already-initialized instance) is
+ * not an error.
+ * @param cdp - the attached page.
+ * @returns whether the notice was there.
+ */
+async function dismissFirstRunNotice(cdp) {
+  const clicked = await cdp.evaluate(() => {
+    for (const el of document.querySelectorAll('button,[role=button]')) {
+      if (el.getBoundingClientRect().width === 0) continue
+      const text = (el.innerText ?? '').trim()
+      const label = (el.getAttribute('aria-label') ?? '').trim()
+      // `继续` is the notice's own button; nothing else on the page uses it.
+      if (text !== '继续' && label !== '继续') continue
+      el.click()
+      return true
+    }
+    return false
+  })
+  if (clicked) await sleep(2500)
+  return clicked
 }
 
 /** One scenario's checks, reported in order. */
@@ -81,18 +146,23 @@ function scenario(name, log) {
 /**
  * Run the browser scenarios.
  * @param options - `url` of the running instance, CDP `port`, the `project` under test,
- * its `home`, the `profile` the settings card writes to, and the project's
- * definition `projectNames`.
+ * its `home`, the `profile` the settings card writes to, the project's
+ * definition `projectNames`, and the name of a `continuable` definition to
+ * delegate to in C3.
  * @returns one entry per scenario, each with its failures.
  */
 export async function runGuiScenarios(options) {
-  const { url, port, project, home, profile, projectNames, log = console.log } = options
+  const { url, port, project, home, profile, projectNames, continuable, log = console.log } = options
   const patchPath = join(home, 'profiles', profile, 'cordis.patch.yml')
   const group = sessionGroup(home, project)
   const readTrust = () => /trustProjectAgents:\s*(\w+)/.exec(readFileSync(patchPath, 'utf8'))?.[1]
 
   const cdp = await Cdp.attach(port)
   await cdp.goto(url, 6000)
+  // A first-run instance opens the preview notice over everything else; while it
+  // is up no sidebar row or composer is reachable, so dismissing it is part of
+  // reaching the page rather than a scenario of its own.
+  await dismissFirstRunNotice(cdp)
   const openCard = async () => {
     await openPluginManager(cdp)
     return openPluginCard(cdp, PACKAGE_NAME)
@@ -119,9 +189,15 @@ export async function runGuiScenarios(options) {
     await newSession(cdp)
     const first = await sendMessage(cdp, '只回复两个字：收到C1', 32000)
     c1.check('the first message was sent', first.sent === true, `typed ${JSON.stringify(first.typed)}`)
-    const session = latestSessions(group, 1)[0]
-    c1.check('the first request lists no project definitions',
-      (enumOf(session.dir, 0) ?? null) === null, `enum=${JSON.stringify(enumOf(session.dir, 0))}`)
+    // The marker, not directory order: a child's own log lives in the same group
+    // and becomes the newest entry whenever it settles.
+    const session = await sessionWithMarker(group, '收到C1')
+    c1.check('the session log is readable',
+      session !== undefined, session === undefined ? 'no session log carries the prompt' : session.name)
+    if (session !== undefined) {
+      c1.check('the first request lists no project definitions',
+        (enumOf(session.dir, 0) ?? null) === null, `enum=${JSON.stringify(enumOf(session.dir, 0))}`)
+    }
 
     await openCard()
     const flipped = await setSwitch(cdp, TRUST_SWITCH, true)
@@ -133,9 +209,9 @@ export async function runGuiScenarios(options) {
     const second = await sendMessage(cdp, '只回复两个字：好的', 32000)
     c1.check('the second message was sent', second.sent === true, `typed ${JSON.stringify(second.typed)}`)
 
-    const requests = readSession(session.dir).filter(event => event.type === 'request/header').length
+    const requests = session === undefined ? 0 : readSession(session.dir).filter(event => event.type === 'request/header').length
     c1.check('the same session issued two requests', requests >= 2, `${requests} request/header events`)
-    const after = enumOf(session.dir, -1)
+    const after = session === undefined ? null : enumOf(session.dir, -1)
     c1.check('the settings write reaches the already-open session',
       (after ?? []).length === projectNames.length && projectNames.every(name => after.includes(name)),
       `enum=${JSON.stringify(after)}`)
@@ -148,7 +224,10 @@ export async function runGuiScenarios(options) {
     try {
       await newSession(cdp)
       await sendMessage(cdp, '只回复两个字：收到C4', 32000)
-      const target = latestSessions(group, 1)[0]
+      const target = await sessionWithMarker(group, '收到C4')
+      c4.check('the session log is readable',
+        target !== undefined, target === undefined ? 'no session log carries the prompt' : target.name)
+      if (target === undefined) throw new Error('no session log carries the C4 prompt')
       c4.check('the first request lists only the project definitions',
         (enumOf(target.dir, 0) ?? []).length === projectNames.length,
         `enum=${JSON.stringify(enumOf(target.dir, 0))}`)
@@ -177,86 +256,94 @@ export async function runGuiScenarios(options) {
     // ---- C3 -----------------------------------------------------------------
     const c3 = scenario('gui-continuable-settlement', log)
     log('\n== C3 a continuable child reports its closing text back ==')
-    await newSession(cdp)
-    await sendMessage(cdp, [
-      '委派 explorer 子代理做一次只读核对，然后留在这一轮等待它回传结论。',
-      '委派方式：调用 subagent_custom，agent_type = "explorer"，prompt 只要一句：',
-      `"用 grep 在 ${project} 下搜索 class RabbitConstants，把命中数与文件路径写在最后一条消息里。"`,
-      '如果 subagent_custom 返回的是 started subagent <id>，请直接说明你已委派并结束本轮，不要自己再搜索。',
-    ].join('\n'), 90000)
-    await sleep(45000)
-
-    const logs = latestSessions(group, 24).map(entry => ({ ...entry, events: readSession(entry.dir) }))
-    // A continuable child writes its own log, so the parent is identified by the
-    // catalogue entry that names the child, not by directory order.
-    const parent = logs.find(entry => entry.events.some(event => event.type === 'subagent/catalog'))
-    if (parent === undefined) {
-      c3.check('the parent log records a delegation', false, 'no session log holds a subagent/catalog event')
+    if (continuable === undefined) {
+      // The settlement notice only exists for `delivery: 'parent'`, which only a
+      // `continuable` definition asks for; a project without one cannot exercise it.
+      c3.check('the project offers a continuable definition to delegate to', false,
+        `${project} declares no definition with mode = "continuable"`)
+      scenarios.push(c3.settled())
     } else {
-      const catalog = parent.events.filter(event => event.type === 'subagent/catalog')
-      const childId = catalog.at(-1)?.data?.childId
-      const child = logs.find(entry => entry.name.includes(childId))
-      const closingNow = () => (child === undefined
-        ? ''
-        : readSession(child.dir).filter(event => event.type === 'assistant/message')
-          .map(event => (event.data?.message?.content ?? []).map(part => part?.text ?? '').join(''))
-          .filter(text => text.length > 0).at(-1) ?? '')
-      // The notice lands on `next-turn` when the parent is idle at that moment and
-      // on `next-step` when it is still mid-turn, so both targets carry it.
-      const noticeText = event => (event.data?.inserted ?? []).flatMap(part => part?.content ?? [])
-        .map(part => part?.text ?? '').join('\n')
-      const noticesOf = events => events
-        .filter(event => event.type === 'agent/inbox/spliced'
-          && (event.data?.target === 'next-turn' || event.data?.target === 'next-step')
-          && (event.data?.inserted?.length ?? 0) > 0)
-      const noticeOf = events => noticesOf(events)
-        .map(noticeText)
-        .find(text => text.includes('Its closing message:'))
-      // The notice lands whenever the child settles, so poll both logs until the
-      // notice appears and the child has a closing message to compare it with.
-      // Non-empty is the whole requirement: how verbose the child is belongs to the
-      // preset's persona, not to this scenario.
-      const notice = await waitFor(() => {
-        const found = noticeOf(readSession(parent.dir))
-        return found !== undefined && closingNow().length > 0 ? found : undefined
-      }, 240000)
-      const closing = closingNow()
+      await newSession(cdp)
+      await sendMessage(cdp, [
+        `委派 ${continuable} 子代理做一次只读核对，然后留在这一轮等待它回传结论。`,
+        `委派方式：调用 subagent_custom，agent_type = "${continuable}"，prompt 只要一句：`,
+        `"用 grep 在 ${project} 下搜索 class RabbitConstants，把命中数与文件路径写在最后一条消息里。"`,
+        '如果 subagent_custom 返回的是 started subagent <id>，请直接说明你已委派并结束本轮，不要自己再搜索。',
+      ].join('\n'), 90000)
+      await sleep(45000)
 
-      c3.check('the delegation is recorded as a continuable child',
-        catalog.at(-1)?.data?.mode === 'continuable' && typeof childId === 'string',
-        `mode=${catalog.at(-1)?.data?.mode}, child=${String(childId)}`)
-      c3.check('the parent received a settlement notice naming the child',
-        notice !== undefined && notice.includes(String(childId)),
-        notice === undefined ? 'no notice spliced into the parent inbox' : `notice mentions ${childId}`)
-      c3.check('the notice carries the child\'s closing text verbatim',
-        notice !== undefined && closing.length > 0
-        && (notice.split('Its closing message:\n')[1] ?? '').trim() === closing.trim(),
-        `closing message ${closing.length} chars`)
+      const logs = latestSessions(group, 24).map(entry => ({ ...entry, events: readSession(entry.dir) }))
+      // A continuable child writes its own log, so the parent is identified by the
+      // catalogue entry that names the child, not by directory order.
+      const parent = logs.find(entry => entry.events.some(event => event.type === 'subagent/catalog'))
+      if (parent === undefined) {
+        c3.check('the parent log records a delegation', false, 'no session log holds a subagent/catalog event')
+      } else {
+        const catalog = parent.events.filter(event => event.type === 'subagent/catalog')
+        const childId = catalog.at(-1)?.data?.childId
+        const child = logs.find(entry => entry.name.includes(childId))
+        const closingNow = () => (child === undefined
+          ? ''
+          : readSession(child.dir).filter(event => event.type === 'assistant/message')
+            .map(event => (event.data?.message?.content ?? []).map(part => part?.text ?? '').join(''))
+            .filter(text => text.length > 0).at(-1) ?? '')
+        // The notice lands on `next-turn` when the parent is idle at that moment and
+        // on `next-step` when it is still mid-turn, so both targets carry it.
+        const noticeText = event => (event.data?.inserted ?? []).flatMap(part => part?.content ?? [])
+          .map(part => part?.text ?? '').join('\n')
+        const noticesOf = events => events
+          .filter(event => event.type === 'agent/inbox/spliced'
+            && (event.data?.target === 'next-turn' || event.data?.target === 'next-step')
+            && (event.data?.inserted?.length ?? 0) > 0)
+        const noticeOf = events => noticesOf(events)
+          .map(noticeText)
+          .find(text => text.includes('Its closing message:'))
+        // The notice lands whenever the child settles, so poll both logs until the
+        // notice appears and the child has a closing message to compare it with.
+        // Non-empty is the whole requirement: how verbose the child is belongs to the
+        // preset's persona, not to this scenario.
+        const notice = await waitFor(() => {
+          const found = noticeOf(readSession(parent.dir))
+          return found !== undefined && closingNow().length > 0 ? found : undefined
+        }, 240000)
+        const closing = closingNow()
 
-      // Which of the two inbox targets carries the notice is decided by the parent's
-      // own state at that instant — `next-turn` when it is idle, `next-step` when it
-      // is still mid-turn — so the scenario asserts the shape each state calls for
-      // rather than a fixed turn count. An idle parent must be woken (a new turn
-      // starts after the splice); a running parent must have the notice consumed
-      // inside the turn that was already open.
-      const latest = readSession(parent.dir)
-      const noticeEvent = noticesOf(latest)
-        .filter(event => noticeText(event).includes('Its closing message:')).at(-1)
-      const splicedAfter = latest.filter(event => event.type === 'turn/start'
-        && event.seq > (noticeEvent?.seq ?? 0)).length
-      const consumed = latest.some(event => event.type === 'agent/inbox/spliced'
-        && event.data?.target === noticeEvent?.data?.target
-        && (event.data?.removedCount ?? 0) > 0
-        && event.seq > (noticeEvent?.seq ?? 0))
-      c3.check(`the notice is delivered the way the parent's state calls for (${String(noticeEvent?.data?.target)})`,
-        noticeEvent?.data?.target === 'next-turn'
-          ? splicedAfter >= 1
-          : noticeEvent?.data?.target === 'next-step' && consumed,
-        noticeEvent?.data?.target === 'next-turn'
-          ? `parent was idle, ${splicedAfter} turn(s) started after the splice`
-          : `parent was mid-turn, notice consumed in-turn=${consumed}`)
+        c3.check('the delegation is recorded as a continuable child',
+          catalog.at(-1)?.data?.mode === 'continuable' && typeof childId === 'string',
+          `mode=${catalog.at(-1)?.data?.mode}, child=${String(childId)}`)
+        c3.check('the parent received a settlement notice naming the child',
+          notice !== undefined && notice.includes(String(childId)),
+          notice === undefined ? 'no notice spliced into the parent inbox' : `notice mentions ${childId}`)
+        c3.check('the notice carries the child\'s closing text verbatim',
+          notice !== undefined && closing.length > 0
+          && (notice.split('Its closing message:\n')[1] ?? '').trim() === closing.trim(),
+          `closing message ${closing.length} chars`)
+
+        // Which of the two inbox targets carries the notice is decided by the parent's
+        // own state at that instant — `next-turn` when it is idle, `next-step` when it
+        // is still mid-turn — so the scenario asserts the shape each state calls for
+        // rather than a fixed turn count. An idle parent must be woken (a new turn
+        // starts after the splice); a running parent must have the notice consumed
+        // inside the turn that was already open.
+        const latest = readSession(parent.dir)
+        const noticeEvent = noticesOf(latest)
+          .filter(event => noticeText(event).includes('Its closing message:')).at(-1)
+        const splicedAfter = latest.filter(event => event.type === 'turn/start'
+          && event.seq > (noticeEvent?.seq ?? 0)).length
+        const consumed = latest.some(event => event.type === 'agent/inbox/spliced'
+          && event.data?.target === noticeEvent?.data?.target
+          && (event.data?.removedCount ?? 0) > 0
+          && event.seq > (noticeEvent?.seq ?? 0))
+        c3.check(`the notice is delivered the way the parent's state calls for (${String(noticeEvent?.data?.target)})`,
+          noticeEvent?.data?.target === 'next-turn'
+            ? splicedAfter >= 1
+            : noticeEvent?.data?.target === 'next-step' && consumed,
+          noticeEvent?.data?.target === 'next-turn'
+            ? `parent was idle, ${splicedAfter} turn(s) started after the splice`
+            : `parent was mid-turn, notice consumed in-turn=${consumed}`)
+      }
+      scenarios.push(c3.settled())
     }
-    scenarios.push(c3.settled())
   } finally {
     cdp.close()
   }

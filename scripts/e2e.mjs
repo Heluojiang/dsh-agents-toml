@@ -32,7 +32,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { definitionNames, presetDefinition, PRESET_MARKER } from './e2e-headless.mjs'
+import { definitionNames, presetDefinition, presetDefinitions, PRESET_MARKER } from './e2e-headless.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pluginRoot = resolve(process.env.E2E_PLUGIN_ROOT ?? join(here, '..'))
@@ -154,9 +154,10 @@ if (project !== undefined) {
   }
   // `agent_preset` needs a composition that mounts the preset registry, and the
   // headless default profile does not; the scenario therefore has to declare both
-  // the registry and an example preset in its own throwaway profile.
+  // the registry and the presets the project's definitions name in its own
+  // throwaway profile.
   const { ensurePresetProfile } = await import('./e2e-preset-profile.mjs')
-  ensurePresetProfile({ home, profile, dshRoot })
+  ensurePresetProfile({ home, profile, dshRoot, project })
 
   // Without a key, the model itself is scripted: the stub speaks the provider
   // protocol and decides to delegate, so everything below the model stays real.
@@ -208,14 +209,23 @@ if (guiUrl !== undefined) {
     throw new Error('E2E_HOME and E2E_PROJECT are required for the browser scenarios')
   }
   console.log('\n== Browser scenarios (keyed) ==')
+  const guiProfile = process.env.E2E_GUI_PROFILE ?? 'plugin-gui'
+  // The browser instance runs its own throwaway profile, so the presets the
+  // project's definitions name have to be declared there too — otherwise C3's
+  // delegation fails on "preset not registered" instead of testing 0.2.2.
+  const { ensurePresetProfile } = await import('./e2e-preset-profile.mjs')
+  ensurePresetProfile({ home, profile: guiProfile, dshRoot, project })
   const { runGuiScenarios } = await import('./e2e-gui.mjs')
   const gui = await runGuiScenarios({
     url: guiUrl,
     port: Number(process.env.E2E_CDP_PORT ?? 9222),
     project,
     home,
-    profile: process.env.E2E_GUI_PROFILE ?? 'plugin-gui',
+    profile: guiProfile,
     projectNames: definitionNames(project),
+    // C3 needs a `continuable` definition to delegate to; which one is a property
+    // of the project under test, not of this script.
+    continuable: presetDefinitions(project).find(entry => entry.mode === 'continuable')?.name,
   })
   for (const entry of gui) sections.push({ name: entry.name, failures: entry.failures })
 } else {

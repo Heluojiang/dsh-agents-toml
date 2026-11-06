@@ -90,18 +90,14 @@ export function definitionNames(project) {
 }
 
 /**
- * Pick the definition that selects an Agent Preset, so the scenario can assert
- * that this child really was composed from it.
- *
- * 0.4.0 replaced the per-child `persona` and `[tools]` fields with
- * `agent_preset`, so "the composition reached the child" is now proven by the
- * preset's own persona text showing up in the child's system prompt.
+ * Every project definition that selects an Agent Preset, in file order.
  * @param project - the project holding `.dsh/agents`.
- * @returns the definition's name, its `mode`, and the preset it selects, or `undefined`.
+ * @returns the name, `mode`, and preset of each such definition; empty when none.
  */
-export function presetDefinition(project) {
+export function presetDefinitions(project) {
   const agents = join(project, '.dsh', 'agents')
-  if (!existsSync(agents)) return undefined
+  if (!existsSync(agents)) return []
+  const found = []
   for (const file of readdirSync(agents).filter(name => name.endsWith('.toml')).sort()) {
     const source = readFileSync(join(agents, file), 'utf8')
     const name = /^\s*name\s*=\s*"([^"]+)"/m.exec(source)?.[1]
@@ -109,9 +105,32 @@ export function presetDefinition(project) {
     if (name === undefined || preset === undefined) continue
     // `mode` decides which activation the tool must use, so the scenario checks
     // the recorded mode against the definition that was delegated to.
-    return { name, preset, mode: /^\s*mode\s*=\s*"([^"]+)"/m.exec(source)?.[1] ?? 'one-shot' }
+    const mode = /^\s*mode\s*=\s*"([^"]+)"/m.exec(source)?.[1] ?? 'one-shot'
+    found.push({ name, preset, mode })
   }
-  return undefined
+  return found
+}
+
+/**
+ * Pick the definition that selects an Agent Preset, so the scenario can assert
+ * that this child really was composed from it.
+ *
+ * 0.4.0 replaced the per-child `persona` and `[tools]` fields with
+ * `agent_preset`, so "the composition reached the child" is now proven by the
+ * preset's own persona text showing up in the child's system prompt.
+ *
+ * A `one-shot` definition is preferred over a `continuable` one. The delegation
+ * scenario drives `dsh --profile … "task"` synchronously and the run ends with
+ * the parent's turn, so a `continuable` child may settle after that run has
+ * finished — its own log then lacks the later events the checks read. A
+ * `one-shot` child's conclusion is the tool result, so the whole chain is
+ * complete by the time the process exits.
+ * @param project - the project holding `.dsh/agents`.
+ * @returns the definition's name, its `mode`, and the preset it selects, or `undefined`.
+ */
+export function presetDefinition(project) {
+  const found = presetDefinitions(project)
+  return found.find(entry => entry.mode !== 'continuable') ?? found[0]
 }
 
 const textOf = event => (event.data?.message?.content ?? []).map(part => part?.text ?? '').join('')

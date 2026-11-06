@@ -86,14 +86,26 @@ export class Cdp {
 /** Wait for `ms` milliseconds. */
 export const sleep = ms => new Promise(done => setTimeout(done, ms))
 
-/** Click the first visible clickable whose text is exactly `label`. */
+/** Click the first visible clickable whose text is exactly `label`.
+ *
+ * The sidebar's controls are icon-only, so the accessible name lives in
+ * `aria-label` while the expanded variant shows the same words as text; both are
+ * accepted, and a switch is still skipped because clicking one disables a plugin.
+ * @param cdp - the attached page.
+ * @param label - the exact text or accessible name.
+ * @returns whether something was clicked.
+ */
 export async function clickText(cdp, label) {
   const hit = await cdp.evaluate((wanted) => {
     for (const el of document.querySelectorAll('button,a,[role=button],[role=tab]')) {
       if (el.getAttribute('role') === 'switch' || el.hasAttribute('aria-checked')) continue
       const rect = el.getBoundingClientRect()
       if (rect.width === 0 || rect.height === 0) continue
-      if ((el.innerText ?? '').trim() !== wanted) continue
+      const texts = [
+        (el.getAttribute('aria-label') ?? '').trim(),
+        (el.innerText ?? '').trim(),
+      ]
+      if (!texts.includes(wanted)) continue
       el.click()
       return true
     }
@@ -140,7 +152,14 @@ export async function openPluginManager(cdp) {
     for (const el of document.querySelectorAll('button,a,[role=button]')) {
       const rect = el.getBoundingClientRect()
       if (rect.width === 0 || rect.height === 0) continue
-      if ((el.innerText ?? '').trim() === '插件' && rect.y < 300) { el.click(); return true }
+      const label = (el.getAttribute('aria-label') ?? '').trim()
+      const text = (el.innerText ?? '').trim()
+      // The nav entry is icon-only in a collapsed sidebar (accessible name in
+      // `aria-label`) and shows the word when the sidebar is expanded.
+      if (label !== '插件' && text !== '插件') continue
+      if (rect.y > 400) continue
+      el.click()
+      return true
     }
     return false
   })
@@ -151,7 +170,8 @@ export async function openPluginManager(cdp) {
 /** Expand the installed plugin's settings card.
  *
  * Switch buttons carry an aria-label that also names the package, and clicking
- * one disables the plugin, so they are excluded. */
+ * one disables the plugin, so they are excluded. The row is addressed by its
+ * own accessible name (`查看 <package>`), which is what the plugin page renders. */
 export async function openPluginCard(cdp, packageName) {
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const clicked = await cdp.evaluate((wanted) => {
@@ -159,7 +179,9 @@ export async function openPluginCard(cdp, packageName) {
         if (el.getAttribute('role') === 'switch' || el.hasAttribute('aria-checked')) continue
         const rect = el.getBoundingClientRect()
         if (rect.width === 0 || rect.height === 0) continue
-        if ((el.innerText ?? '').trim() !== wanted) continue
+        const label = (el.getAttribute('aria-label') ?? '').trim()
+        const text = (el.innerText ?? '').trim()
+        if (label !== `查看 ${wanted}` && label !== wanted && text !== wanted) continue
         el.click()
         return true
       }
@@ -167,6 +189,9 @@ export async function openPluginCard(cdp, packageName) {
     }, packageName)
     await sleep(2200)
     if (clicked) return true
+    // A freshly opened page may not have rendered the installed section yet.
+    await cdp.evaluate(() => { window.scrollTo(0, document.body.scrollHeight) })
+    await sleep(1200)
   }
   return false
 }
@@ -185,13 +210,24 @@ export async function saveCard(cdp) {
   return clicked
 }
 
-/** Start a fresh session from the sidebar. */
+/** Start a fresh session from the sidebar.
+ *
+ * The control is icon-only, so its accessible name is `新建会话` while the
+ * expanded sidebar may show the same words as text: both are accepted. A
+ * collapsed sidebar hides it entirely, so the toggle is pressed first — an
+ * already-expanded sidebar simply has nothing to do.
+ * @param cdp - the attached page.
+ * @returns whether a new session was started.
+ */
 export async function newSession(cdp) {
+  if (!(await hasSidebarControl(cdp))) await expandSidebar(cdp)
   const clicked = await cdp.evaluate(() => {
-    for (const el of document.querySelectorAll('button')) {
+    for (const el of document.querySelectorAll('button,[role=button]')) {
       const rect = el.getBoundingClientRect()
       if (rect.width === 0 || rect.height === 0) continue
-      if (!(el.innerText ?? '').startsWith('新会话')) continue
+      const label = (el.getAttribute('aria-label') ?? '').trim()
+      const text = (el.innerText ?? '').trim()
+      if (label !== '新建会话' && !text.startsWith('新会话')) continue
       el.click()
       return true
     }
@@ -199,6 +235,48 @@ export async function newSession(cdp) {
   })
   await sleep(2500)
   return clicked
+}
+
+/**
+ * Whether the sidebar's new-session control is reachable right now.
+ * @param cdp - the attached page.
+ * @returns true when the control renders with a box.
+ */
+async function hasSidebarControl(cdp) {
+  return cdp.evaluate(() => {
+    for (const el of document.querySelectorAll('button,[role=button]')) {
+      if (el.getBoundingClientRect().width === 0) continue
+      const label = (el.getAttribute('aria-label') ?? '').trim()
+      const text = (el.innerText ?? '').trim()
+      if (label === '新建会话' || text.startsWith('新会话')) return true
+    }
+    return false
+  })
+}
+
+/**
+ * Expand the sidebar, when it is collapsed.
+ *
+ * The sidebar starts collapsed, and a collapsed sidebar renders no session row at
+ * all: `selectSession` would then find nothing to click and report "not
+ * reselected" while the page is fine. Expanding first is what makes the marker
+ * reachable. An already-expanded sidebar simply has nothing to do.
+ * @param cdp - the attached page.
+ * @returns whether the toggle was pressed.
+ */
+export async function expandSidebar(cdp) {
+  const pressed = await cdp.evaluate(() => {
+    for (const el of document.querySelectorAll('button,[role=button]')) {
+      const rect = el.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) continue
+      if ((el.getAttribute('aria-label') ?? '').trim() !== '打开侧边栏') continue
+      el.click()
+      return true
+    }
+    return false
+  })
+  if (pressed) await sleep(1500)
+  return pressed
 }
 
 /** Select the sidebar session whose text contains `marker`. */
@@ -216,7 +294,10 @@ export async function selectSession(cdp, marker = '') {
       return false
     }, marker)
     await sleep(2000)
-    if (!clicked) continue
+    if (!clicked) {
+      await expandSidebar(cdp)
+      continue
+    }
     const ready = await cdp.evaluate(() => {
       for (const el of document.querySelectorAll('div[role=textbox][contenteditable=true]')) {
         if (el.getBoundingClientRect().width > 0) return true
